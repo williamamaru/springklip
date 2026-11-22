@@ -717,7 +717,7 @@ function fmtTime(ms) {
   return d.toLocaleDateString('da-DK', { day: 'numeric', month: 'short' }) + ' ' + d.toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 function refreshLists() {
-  if (view === 'clips') renderClips();
+  if (view === 'clips' && !assigning) renderClips();
   if (view === 'mine' && mineG) renderMine();
 }
 
@@ -755,12 +755,15 @@ function pinScreen(wrap, title, onOk) {
       return;
     }
     S.pinFails = 0; S.pinLock = 0; save();
-    trainerOk = true; onOk();
+    trainerOk = true; trainerPin = v;
+    await rosterLink(first);
+    onOk();
   };
   $('pinIn').focus();
 }
 
 async function renderClips() {
+  assigning = false;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
   const list = await listClips();
@@ -768,7 +771,8 @@ async function renderClips() {
   const shown = onlyUnk ? list.filter((c) => !c.g) : list;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
-      <button id="unkBtn" class="${onlyUnk ? 'acc' : ''}">Kun ukendte (${list.filter((c) => !c.g).length})</button>
+      ${list.some((c) => !c.g) ? `<button id="assignBtn" class="acc">Tildel ukendte (${list.filter((c) => !c.g).length})</button>` : ''}
+      <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
     <p class="muted">${list.length} klip på denne enhed${cloudTrainer ? ` · ${list.filter((c) => c.cloud).length} sendt til skyen` : ' · ikke logget ind i skyen (se Opsætning)'}. Klip med orange kant mangler et nummer: vælg gymnasten i listen.</p>
     ${shown.length ? `<div class="grid">${shown.map((c) => `
@@ -779,11 +783,11 @@ async function renderClips() {
           <button class="bad ghost" data-del="${c.id}">Slet</button></div></div>`).join('')}</div>`
       : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
+  if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
   $('lockBtn').onclick = () => { trainerOk = false; renderClips(); };
   w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = () => openClip(b.dataset.play)));
   w.querySelectorAll('[data-g]').forEach((s) => (s.onchange = async () => {
-    const c = await getClip(s.dataset.g); c.g = +s.value; await putClip(c); renderClips();
-    if (c.cloud && cloudTrainer) { const { error } = await sb.from('clips').update({ g: c.g }).eq('id', c.id); if (error) toast('Kunne ikke rette i skyen'); }
+    await setClipG(s.dataset.g, +s.value); renderClips();
   }));
   w.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
     if (b.dataset.sure) {
@@ -796,6 +800,48 @@ async function renderClips() {
 }
 
 let mineData = null; // { n, name, clips:[{id,at,dur,thumb,url}] } fra skyen
+// Hurtig tildeling: ét ukendt klip ad gangen, tryk på gymnastens nummer.
+let asUrl = null, assigning = false;
+async function setClipG(id, g) {
+  const c = await getClip(id); if (!c) return;
+  c.g = g; await putClip(c);
+  if (c.cloud && cloudTrainer) { const { error } = await sb.from('clips').update({ g }).eq('id', id); if (error) toast('Kunne ikke rette i skyen'); }
+}
+async function renderAssign(skip) {
+  assigning = true;
+  const w = $('clipsWrap');
+  if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
+  const unk = (await listClips()).filter((c) => !c.g).reverse(); // ældste først
+  if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; }
+  if (!unk.length || skip >= unk.length) {
+    w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer. 👏'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
+    $('asBack').onclick = renderClips; return;
+  }
+  const c = await getClip(unk[skip].id);
+  const named = S.roster.filter((g) => g.name);
+  const list = named.length ? named : S.roster;
+  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
+      <button id="asDone">Færdig</button></div>
+    <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
+      ${c.blob ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${c.thumb}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr));margin-top:12px">
+      ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b>${g.name ? `<span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span>` : ''}</button>`).join('')}
+    </div>
+    <div class="row" style="margin-top:12px"><button id="asSkip">Spring over</button><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
+  if (c.blob) { asUrl = URL.createObjectURL(c.blob); const v = $('asV'); v.src = asUrl; v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
+  else $('asSlow').hidden = true;
+  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { await setClipG(c.id, +b.dataset.as); toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
+  $('asSkip').onclick = () => renderAssign(skip + 1);
+  $('asDone').onclick = () => { if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; } renderClips(); };
+  $('asDel').onclick = async (e) => {
+    if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
+    await delClip(c.id);
+    if (c.cloud && cloudTrainer) { await sb.storage.from('clips').remove([c.path]); await sb.from('clips').delete().eq('id', c.id); }
+    renderAssign(skip);
+  };
+}
+
 async function renderMine() {
   const w = $('mineWrap');
   clearTimeout(idleT);
@@ -888,7 +934,7 @@ function renderSetup() {
     b.textContent = 'Alle klip er slettet'; delete b.dataset.sure;
   };
   $('testFile').onchange = (e) => { const f = e.target.files[0]; if (f) { show('live'); startCamera(f); } };
-  $('newPin').onclick = () => { S.trainerHash = ''; save(); trainerOk = false; renderSetup(); };
+  $('newPin').onclick = () => { S.trainerHash = ''; save(); trainerOk = false; trainerPin = null; renderSetup(); };
 }
 
 // ---------- Skyen (Supabase) ----------
@@ -910,15 +956,59 @@ async function cloudCheck() {
   } catch {}
   if (view === 'setup' && trainerOk) renderCloud();
   if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
-  if (cloudTrainer) { cloudRoster(S.roster); cloudRetry(); cloudPrune(); }
+  if (cloudTrainer) { if (S.rosterLinked) cloudRoster(S.roster); cloudRetry(); cloudPrune(); if (trainerOk && !S.rosterLinked) rosterLink(false); }
 }
 const codeHash = async (n, code) => {
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`springklip:${n}:${code}`));
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
 };
+// Pigernes koder gemmes i skyen krypteret med trænerkoden (AES-GCM, nøgle fra PBKDF2).
+// Kun en træner, der kender trænerkoden, kan hente dem tilbage på en ny iPad.
+let trainerPin = null;
+const b64 = (u8) => btoa(String.fromCharCode(...u8));
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function pinKey(pin, salt) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+let keyCache = null; // { pin, salt, key }
+async function encCode(code) {
+  if (!trainerPin) return undefined;
+  if (!keyCache || keyCache.pin !== trainerPin) { const salt = crypto.getRandomValues(new Uint8Array(16)); keyCache = { pin: trainerPin, salt, key: await pinKey(trainerPin, salt) }; }
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, keyCache.key, new TextEncoder().encode(code)));
+  return b64(new Uint8Array([...keyCache.salt, ...iv, ...ct]));
+}
+async function decCode(enc, pin) {
+  const all = unb64(enc), salt = all.slice(0, 16), iv = all.slice(16, 28), ct = all.slice(28);
+  const key = await pinKey(pin, salt);
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
+}
+// Kobler denne enheds gymnastliste til skyen. En ny enhed henter koderne i stedet for at overskrive dem.
+async function rosterLink(newPin) {
+  if (!cloudTrainer || !trainerPin) return;
+  if (S.rosterLinked) { if (newPin) await cloudRoster(S.roster); return; }
+  const { data, error } = await sb.from('gymnasts').select('n, name, code_enc').order('n');
+  if (error) return;
+  const withEnc = (data || []).filter((r) => r.code_enc);
+  if (!withEnc.length) { S.rosterLinked = true; save(); await cloudRoster(S.roster); return; } // skyen er tom (eller har kun gamle rækker fra denne enhed)
+  try {
+    const restored = [];
+    for (const r of data) restored.push({ n: r.n, name: r.name || '', code: r.code_enc ? await decCode(r.code_enc, trainerPin) : newCode() });
+    S.roster = restored; S.rosterLinked = true; save();
+    toast(`Hentede ${withEnc.length} gymnaster og deres koder fra skyen`);
+    if (view === 'setup') renderSetup();
+  } catch {
+    toast('Koderne i skyen er låst med en anden trænerkode. Brug samme trænerkode som på den gamle iPad.');
+  }
+}
 async function cloudRoster(list) {
-  if (!cloudTrainer) return;
-  const rows = await Promise.all(list.map(async (g) => ({ n: g.n, name: g.name, code_hash: await codeHash(g.n, g.code), updated_at: new Date().toISOString() })));
+  if (!cloudTrainer || !S.rosterLinked) return;
+  const rows = await Promise.all(list.map(async (g) => {
+    const r = { n: g.n, name: g.name, code_hash: await codeHash(g.n, g.code), updated_at: new Date().toISOString() };
+    const e = await encCode(g.code); if (e) r.code_enc = e;
+    return r;
+  }));
   const { error } = await sb.from('gymnasts').upsert(rows);
   if (error) toast('Navne og koder kunne ikke sendes til skyen');
 }
@@ -989,7 +1079,7 @@ function renderCloud() {
 if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
 
 let lockT = null;
-document.addEventListener('pointerdown', () => { clearTimeout(lockT); lockT = setTimeout(() => { if (trainerOk) { trainerOk = false; if (view === 'clips' || view === 'setup') show(view); } }, 10 * 60 * 1000); }, true);
+document.addEventListener('pointerdown', () => { clearTimeout(lockT); lockT = setTimeout(() => { if (trainerOk) { trainerOk = false; trainerPin = null; if (view === 'clips' || view === 'setup') show(view); } }, 10 * 60 * 1000); }, true);
 
 // ---------- Status ----------
 let toastT = null;
