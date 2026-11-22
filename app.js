@@ -211,6 +211,17 @@ let lags = S.delays.slice(), paused = false, pausedAt = [0, 0, 0, 0], sel = 0, z
 const vs = [0, 1, 2, 3].map(() => ({ cur: null, idx: -1 }));
 // Billeder afkodes et par billeder før de skal vises, så der altid ligger et klar. Afkodede billeder deles mellem visningerne.
 const decoded = new Set();
+const perf = { shown: 0, lastShown: null, fpsShown: 0, fpsCap: 0 };
+setInterval(() => {
+  perf.fpsShown = perf.shown / 2; perf.shown = 0;
+  const r = ring.filter((f) => f.t > now() - 2);
+  perf.fpsCap = r.length / 2;
+  const el = document.getElementById('perfTxt');
+  if (el) el.textContent = perfText();
+}, 2000);
+function perfText() {
+  return `Gemmer ${perf.fpsCap.toFixed(0)} billeder/sek. · viser ${perf.fpsShown.toFixed(0)} billeder/sek. · komprimering: ${encW ? 'i baggrunden' : 'på hovedtråden (langsommere)'} · tidsstempler: ${cam.requestVideoFrameCallback ? 'fra kameraet' : 'fra skærmen'} · billedstørrelse ${CAP_W}×${CAP_H}`;
+}
 function ensureDecoded(f) {
   if (!f || f.bmp || f.dec) return;
   const p = createImageBitmap(f.blob);
@@ -307,6 +318,7 @@ function drawLoop() {
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });
   for (let i = P.length; i < 4; i++) vs[i].cur = null;
+  if (vs[0].cur && vs[0].cur !== perf.lastShown) { perf.lastShown = vs[0].cur; perf.shown++; }
   pruneDecoded(viewTs);
 }
 requestAnimationFrame(drawLoop);
@@ -1006,6 +1018,10 @@ function renderSetup() {
       <div class="row"><button id="addG">Tilføj nummer</button>
       <a href="skilte/Nummerskilte_1-30.pdf" target="_blank" rel="noopener"><button>Nummerskilte 1–30 (PDF)</button></a></div>
     </div>
+    <div class="sec"><h3>Ydelse på denne enhed</h3>
+      <p class="muted" id="perfTxt">${running ? perfText() : 'Start kameraet under Live for at se tallene.'}</p>
+      <p class="muted" style="font-size:13px">Ved 30 billeder/sek. kører det helt glat. Står der "på hovedtråden", mangler browseren en funktion, og det kan hakke mere.</p>
+    </div>
     <div class="sec"><h3>Springgenkendelse</h3>
       <label>Følsomhed: kræver at <b id="sensV">${S.sens}</b> % af luftfeltet bevæger sig
         <input id="sens" type="range" min="0.3" max="6" step="0.1" value="${S.sens}" style="width:100%"></label>
@@ -1208,7 +1224,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123002749';
+const APP_VERSION = '20261123004056';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
