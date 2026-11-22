@@ -769,7 +769,7 @@ function pinScreen(wrap, title, onOk) {
     }
     S.pinFails = 0; S.pinLock = 0; save();
     trainerOk = true; trainerPin = v;
-    await rosterLink(first);
+    await rosterPull();
     onOk();
   };
   $('pinIn').focus();
@@ -963,11 +963,22 @@ function renderSetup() {
       <input id="testFile" type="file" accept="video/*">
     </div>
     <div class="sec"><h3>Trænerkode</h3><button id="newPin">Skift trænerkode</button></div>`;
-  w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudRoster([g]); }));
-  w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = () => { const g = S.roster.find((x) => x.n === +b.dataset.new); g.code = newCode(); save(); cloudRoster([g]); renderSetup(); }));
-  $('addG').onclick = () => { const n = S.roster.length + 1; if (n > 50) return; const g = { n, name: '', code: newCode() }; S.roster.push(g); save(); cloudRoster([g]); renderSetup(); };
+  w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudName(g); }));
+  // Ny kode kræver to tryk, fordi den gamle kode holder op med at virke
+  w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = async () => {
+    if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = 'Sikker? Tryk igen'; b.classList.add('bad'); setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = 'Ny kode'; b.classList.remove('bad'); } }, 4000); return; }
+    const g = S.roster.find((x) => x.n === +b.dataset.new);
+    if (cloudTrainer) { const c = await cloudNewCode(g.n); if (!c) return; g.code = c; } else g.code = newCode();
+    save(); renderSetup(); toast(`Ny kode til ${gName(g.n)}. Den gamle virker ikke længere.`);
+  }));
+  $('addG').onclick = async () => {
+    const n = S.roster.length + 1; if (n > 50) return;
+    let code = newCode();
+    if (cloudTrainer) { const c = await cloudNewCode(n); if (!c) return; code = c; }
+    S.roster.push({ n, name: '', code }); save(); renderSetup();
+  };
   renderCloud();
-  if (cloudTrainer && trainerPin && !setupPulled) { setupPulled = true; rosterLink(false); }
+  if (cloudTrainer && !setupPulled) { setupPulled = true; rosterPull(); }
   w.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => {
     const g = S.roster.find((x) => x.n === +b.dataset.show);
     b.textContent = b.textContent.startsWith('•') ? g.code : '••••••';
@@ -1003,75 +1014,42 @@ async function cloudCheck() {
   } catch {}
   if (view === 'setup' && trainerOk) renderCloud();
   if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
-  if (cloudTrainer) { cloudRetry(); cloudPrune(); if (trainerOk) rosterLink(false); }
+  if (cloudTrainer) { cloudRetry(); cloudPrune(); rosterPull(); }
 }
 const codeHash = async (n, code) => {
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`springklip:${n}:${code}`));
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
 };
-// Pigernes koder gemmes i skyen krypteret med trænerkoden (AES-GCM, nøgle fra PBKDF2).
-// Kun en træner, der kender trænerkoden, kan hente dem tilbage på en ny iPad.
-let trainerPin = null;
-const b64 = (u8) => btoa(String.fromCharCode(...u8));
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-async function pinKey(pin, salt) {
-  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-}
-let keyCache = null; // { pin, salt, key }
-async function encCode(code) {
-  if (!trainerPin) return undefined;
-  if (!keyCache || keyCache.pin !== trainerPin) { const salt = crypto.getRandomValues(new Uint8Array(16)); keyCache = { pin: trainerPin, salt, key: await pinKey(trainerPin, salt) }; }
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, keyCache.key, new TextEncoder().encode(code)));
-  return b64(new Uint8Array([...keyCache.salt, ...iv, ...ct]));
-}
-async function decCode(enc, pin) {
-  const all = unb64(enc), salt = all.slice(0, 16), iv = all.slice(16, 28), ct = all.slice(28);
-  const key = await pinKey(pin, salt);
-  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
-}
-// Kobler denne enheds gymnastliste til skyen. En ny enhed henter koderne i stedet for at overskrive dem.
-// Skyen er stedet, hvor pigernes koder "bor". Hver gang en træner låser op, hentes listen fra skyen,
-// så alle enheder (iPad, computer, telefon) viser de samme koder. Enheden sender kun sine egne ændringer op.
-async function rosterLink(newPin) {
-  if (!cloudTrainer || !trainerPin) return;
-  // skift af trænerkode på en enhed, der allerede er koblet: krypter alle koder igen med den nye kode
-  if (newPin && S.rosterLinked) { await cloudRoster(S.roster, true); return; }
-  const { data, error } = await sb.from('gymnasts').select('n, name, code_enc').order('n');
-  if (error) return;
-  const withEnc = (data || []).filter((r) => r.code_enc);
-  if (!withEnc.length) { S.rosterLinked = true; save(); await cloudRoster(S.roster, true); return; } // skyen er tom: denne enhed bestemmer
-  try {
-    const byN = new Map(S.roster.map((g) => [g.n, g]));
-    for (const r of data) {
-      const code = r.code_enc ? await decCode(r.code_enc, trainerPin) : (byN.get(r.n)?.code || newCode());
-      byN.set(r.n, { n: r.n, name: r.name || '', code });
-    }
-    S.roster = [...byN.values()].sort((x, y) => x.n - y.n);
-    S.rosterLinked = true; save();
-    await cloudRoster(S.roster, true); // sikrer at fingeraftryk og krypterede koder passer sammen
-    if (view === 'setup') renderSetup();
-  } catch {
-    // navnene er ikke hemmelige: hent dem alligevel, men behold enhedens egne koder og send dem ikke op
-    const byN = new Map(S.roster.map((g) => [g.n, g]));
-    for (const r of data) { const g = byN.get(r.n); if (g) g.name = r.name || ''; else byN.set(r.n, { n: r.n, name: r.name || '', code: newCode() }); }
-    S.roster = [...byN.values()].sort((x, y) => x.n - y.n);
-    S.rosterLinked = false; codeLock = true; save();
-    if (view === 'setup') renderSetup();
-  }
-}
+// Pigernes koder bor i skyen og er låst: kun et bevidst tryk på "Ny kode" (funktionen new_gymnast_code i Supabase)
+// kan ændre en kode. Enhederne henter bare listen. Trænere må kun rette navne direkte.
+let trainerPin = null; // bruges ikke længere til koder, men nulstilles ved lås
 let codeLock = false, setupPulled = false;
-async function cloudRoster(list, force) {
-  if (!cloudTrainer || !S.rosterLinked || !trainerPin) return; // sendes kun op, når trænerkoden er kendt (så koderne kan krypteres)
-  if (!force && !trainerOk) return;
-  const rows = await Promise.all(list.map(async (g) => {
-    const r = { n: g.n, name: g.name, code_hash: await codeHash(g.n, g.code), updated_at: new Date().toISOString() };
-    const e = await encCode(g.code); if (e) r.code_enc = e;
-    return r;
-  }));
-  const { error } = await sb.from('gymnasts').upsert(rows);
-  if (error) toast('Navne og koder kunne ikke sendes til skyen');
+async function rosterPull() {
+  if (!cloudTrainer) return false;
+  const { data, error } = await sb.from('gymnasts').select('n, name, code').order('n');
+  if (error || !data) return false;
+  if (!data.length) {
+    for (const g of S.roster) await sb.rpc('new_gymnast_code', { p_n: g.n });
+    const again = await sb.from('gymnasts').select('n, name, code').order('n');
+    if (again.error || !again.data) return false;
+    data.push(...again.data);
+  }
+  const before = JSON.stringify(S.roster);
+  S.roster = data.map((r) => ({ n: r.n, name: r.name || '', code: r.code || '' }));
+  S.rosterLinked = true; save();
+  if (JSON.stringify(S.roster) !== before && view === 'setup' && trainerOk) renderSetup();
+  return true;
+}
+const rosterLink = () => rosterPull();
+async function cloudName(g) {
+  if (!cloudTrainer) return;
+  const { error } = await sb.from('gymnasts').update({ name: g.name, updated_at: new Date().toISOString() }).eq('n', g.n);
+  if (error) toast('Navnet kunne ikke gemmes i skyen');
+}
+async function cloudNewCode(n) {
+  const { data, error } = await sb.rpc('new_gymnast_code', { p_n: n });
+  if (error || !data) { toast('Kunne ikke lave ny kode i skyen'); return null; }
+  return data;
 }
 async function cloudUpload(c) {
   if (!cloudTrainer || !c.blob || c.cloud) return false;
@@ -1128,15 +1106,15 @@ function renderCloud() {
     $('cUp').onclick = () => go(true);
     return;
   }
-  const lockWarn = codeLock ? `<p class="err" style="margin:0">Pigernes koder i skyen er låst med en anden trænerkode end den, du brugte her. Navnene er hentet, men koderne på denne enhed passer ikke. Lås op med samme trænerkode som på den første enhed (tryk "Skift trænerkode" nederst).</p>` : '';
+  const lockWarn = '';
   el.innerHTML = cloudTrainer
     ? `<h3>Skyen: forbundet</h3>${lockWarn}<p class="muted">Logget ind som ${esc(cloudUser.email)}. Nye klip bliver sendt op automatisk. Gymnasterne ser deres egne på <b>williamamaru.github.io/springklip/#mine</b>.</p>
-       <div class="row"><button id="cSync">Send navne, koder og manglende klip</button><button class="ghost" id="cOut">Log ud af skyen</button></div><p class="muted" id="cMsg"></p>`
+       <div class="row"><button id="cSync">Hent navne og koder · send manglende klip</button><button class="ghost" id="cOut">Log ud af skyen</button></div><p class="muted" id="cMsg"></p>`
     : `<h3>Skyen: venter på godkendelse</h3><p class="muted">Logget ind som ${esc(cloudUser.email)}, men kontoen er ikke godkendt som træner endnu. Når den er godkendt, så tryk "Tjek igen".</p>
        <div class="row"><button id="cAgain">Tjek igen</button><button class="ghost" id="cOut">Log ud af skyen</button></div>`;
   $('cOut').onclick = async () => { await sb.auth.signOut(); cloudUser = null; cloudTrainer = false; renderCloud(); };
   if ($('cAgain')) $('cAgain').onclick = cloudCheck;
-  if ($('cSync')) $('cSync').onclick = async () => { $('cMsg').textContent = 'Sender …'; await cloudRoster(S.roster); await cloudRetry(); $('cMsg').textContent = 'Færdig.'; };
+  if ($('cSync')) $('cSync').onclick = async () => { $('cMsg').textContent = 'Henter og sender …'; await rosterPull(); await cloudRetry(); $('cMsg').textContent = 'Færdig.'; };
 }
 if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
 
@@ -1173,7 +1151,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123000326';
+const APP_VERSION = '20261123000923';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
