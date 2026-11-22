@@ -301,13 +301,68 @@ $('camSwitch').onclick = async () => {
   } catch { toast('Kunne ikke skifte kamera'); }
 };
 // vælg billede ved tryk, og skjul knapperne når der ikke bliver rørt ved skærmen
-screen.addEventListener('pointerdown', (e) => {
-  if (zoneMode || S.views === 1) return;
+// Træk vandret på billedet for at spole: til venstre = tilbage i tid, til højre = frem mod live.
+// Hele skærmens bredde svarer til 20 sekunder. Dobbelttryk = pause/afspil.
+let drag = null, lastTap = 0;
+function paneAt(e) {
   const r = screen.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1);
   const x = (e.clientX - r.left) * dpr, y = (e.clientY - r.top) * dpr;
-  const i = panes(screen.width, screen.height).findIndex((p) => x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h);
-  if (i >= 0) { sel = i; syncDelayUI(); }
+  return Math.max(0, panes(screen.width, screen.height).findIndex((p) => x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h));
+}
+function shiftView(i, sec) {
+  const lo = oldest(), hi = now();
+  if (paused) pausedAt[i] = Math.max(lo, Math.min(hi, pausedAt[i] + sec));
+  else lags[i] = Math.max(0, Math.min(hi - lo, lags[i] - sec));
+}
+screen.addEventListener('pointerdown', (e) => {
+  if (zoneMode || !running) return;
+  const i = S.views === 1 ? 0 : paneAt(e);
+  if (S.views > 1) { sel = i; syncDelayUI(); }
+  drag = { i, x0: e.clientX, y0: e.clientY, moved: false, start: paused ? pausedAt[i] : lags[i], applied: 0, id: e.pointerId };
+  screen.setPointerCapture(e.pointerId);
 });
+screen.addEventListener('pointermove', (e) => {
+  if (!drag || zoneMode || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.x0;
+  if (!drag.moved && Math.abs(dx) < 10) return;
+  drag.moved = true;
+  const w = screen.getBoundingClientRect().width || 1;
+  const sec = (dx / w) * 20;
+  shiftView(drag.i, sec - drag.applied);
+  drag.applied = sec;
+  const box = $('dragBox'); box.hidden = false;
+  const behind = Math.max(0, now() - viewT(drag.i));
+  box.innerHTML = `${sec < 0 ? '−' : '+'}${Math.abs(sec).toFixed(1)} s<small>${behind < 0.5 ? 'live' : Math.round(behind) + ' s bagud'}</small>`;
+});
+const endDrag = (e) => {
+  if (!drag || (e && e.pointerId !== drag.id)) return;
+  $('dragBox').hidden = true;
+  if (!drag.moved) {
+    const t = performance.now();
+    if (t - lastTap < 320) { $('pause').click(); lastTap = 0; } else lastTap = t;
+  }
+  drag = null;
+};
+screen.addEventListener('pointerup', endDrag);
+screen.addEventListener('pointercancel', endDrag);
+
+// Tidslinje: viser hvor i optagelsen det valgte billede er, og kan trækkes
+const scrub = $('scrub');
+let scrubbing = false;
+scrub.addEventListener('pointerdown', () => (scrubbing = true));
+scrub.addEventListener('pointerup', () => (scrubbing = false));
+scrub.addEventListener('input', () => {
+  const lo = oldest(), hi = now(), t = lo + (scrub.value / 1000) * (hi - lo);
+  if (paused) pausedAt[sel] = t; else lags[sel] = Math.max(0, hi - t);
+});
+setInterval(() => {
+  if (!running && !ring.length) { $('scrubTxt').textContent = '—'; return; }
+  const lo = oldest(), hi = now(), t = viewT(sel);
+  if (!scrubbing && document.activeElement !== scrub) scrub.value = Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000);
+  const behind = Math.max(0, hi - t);
+  $('scrubTxt').textContent = (S.views > 1 ? LET[sel] + ' ' : '') + (behind < 0.5 ? 'Live' : `−${Math.round(behind)} s`);
+}, 200);
+$('moreBtn').onclick = () => { const o = $('bar').classList.toggle('open'); $('moreBtn').setAttribute('aria-expanded', o); };
 let calmT = null;
 function wake() {
   document.body.classList.remove('calm');
