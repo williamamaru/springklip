@@ -601,6 +601,7 @@ $('plReplay').onclick = () => {
 let view = 'live', trainerOk = false, mineG = null, idleT = null;
 $('tabs').onclick = (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.v); };
 function show(v) {
+  if (document.body.classList.contains('gymnast')) v = 'mine';
   view = v;
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.v === v);
   for (const id of ['live', 'clips', 'mine', 'setup']) $(id).hidden = id !== v;
@@ -621,19 +622,37 @@ function refreshLists() {
 // Trænerkode
 function pinScreen(wrap, title, onOk) {
   const first = !S.trainerHash;
+  // første gang på en enhed: kun en godkendt træner (logget ind i skyen) kan oprette trænerpanelet
+  if (first && sb && !cloudTrainer) {
+    wrap.innerHTML = `<div class="pin" style="max-width:560px"><h2>${esc(title)}</h2>
+      <p class="muted">Kun for trænere. Log ind med trænerlogin for at sætte denne enhed op.</p>
+      <div class="sec" id="cloudSec" style="text-align:left"></div></div>`;
+    renderCloud();
+    return;
+  }
+  const lockLeft = Math.ceil(((S.pinLock || 0) - Date.now()) / 1000);
   wrap.innerHTML = `<form class="pin" id="pinF">
     <h2>${esc(title)}</h2>
-    <p class="muted">${first ? 'Vælg en trænerkode (mindst 4 cifre). Den beskytter klip og opsætning.' : 'Skriv trænerkoden.'}</p>
+    <p class="muted">${first ? 'Vælg en trænerkode på mindst 6 cifre. Den beskytter klip, opsætning og pigernes koder på denne enhed.' : 'Skriv trænerkoden.'}</p>
     <input id="pinIn" type="password" inputmode="numeric" autocomplete="off" aria-label="Trænerkode">
     <button class="acc">${first ? 'Gem kode' : 'Åbn'}</button>
-    <p class="err" id="pinErr"></p></form>`;
+    <p class="err" id="pinErr">${lockLeft > 0 ? `For mange forkerte forsøg. Vent ${Math.ceil(lockLeft / 60)} min.` : ''}</p></form>`;
   $('pinF').onsubmit = async (e) => {
     e.preventDefault();
+    if ((S.pinLock || 0) > Date.now()) { $('pinErr').textContent = `For mange forkerte forsøg. Vent ${Math.ceil((S.pinLock - Date.now()) / 60000)} min.`; return; }
     const v = $('pinIn').value.trim();
-    if (v.length < 4) { $('pinErr').textContent = 'Koden skal have mindst 4 tegn.'; return; }
+    if (first && v.length < 6) { $('pinErr').textContent = 'Koden skal have mindst 6 tegn.'; return; }
     const h = await sha(v);
     if (first) { S.trainerHash = h; save(); }
-    if (h !== S.trainerHash) { $('pinErr').textContent = 'Forkert kode.'; return; }
+    if (h !== S.trainerHash) {
+      S.pinFails = (S.pinFails || 0) + 1;
+      if (S.pinFails >= 5) { S.pinLock = Date.now() + Math.min(60, 5 * 2 ** (S.pinFails - 5)) * 60000; }
+      save();
+      $('pinErr').textContent = S.pinFails >= 5 ? 'Forkert kode. Panelet er låst i et stykke tid.' : 'Forkert kode.';
+      $('pinIn').value = '';
+      return;
+    }
+    S.pinFails = 0; S.pinLock = 0; save();
     trainerOk = true; onOk();
   };
   $('pinIn').focus();
@@ -728,10 +747,10 @@ function renderSetup() {
   w.innerHTML = `<h2>Opsætning</h2>
     <div class="sec" id="cloudSec"></div>
     <div class="sec"><h3>Gymnaster</h3>
-      <p class="muted">Nummeret passer til skiltet. Giv hver gymnast sin personlige kode, så hun kan se sine egne spring under "Mine spring".</p>
+      <p class="muted">Nummeret passer til skiltet. Tryk på prikkerne for at se en gymnasts kode, og giv hende den personligt. Med koden kan hun se sine egne spring på williamamaru.github.io/springklip/#mine.</p>
       <table><thead><tr><th>Nr.</th><th>Navn</th><th>Kode</th><th></th></tr></thead><tbody>
       ${S.roster.map((g) => `<tr><td class="num">${g.n}</td><td><input type="text" data-name="${g.n}" value="${esc(g.name)}" placeholder="Navn" aria-label="Navn til nr. ${g.n}"></td>
-        <td class="code">${g.code}</td><td><button class="ghost" data-new="${g.n}">Ny kode</button></td></tr>`).join('')}
+        <td class="code"><button class="ghost" data-show="${g.n}" aria-label="Vis kode for nr. ${g.n}">••••••</button></td><td><button class="ghost" data-new="${g.n}">Ny kode</button></td></tr>`).join('')}
       </tbody></table>
       <div class="row"><button id="addG">Tilføj nummer</button>
       <a href="skilte/Nummerskilte_1-30.pdf" target="_blank" rel="noopener"><button>Nummerskilte 1–30 (PDF)</button></a></div>
@@ -754,6 +773,10 @@ function renderSetup() {
   w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = () => { const g = S.roster.find((x) => x.n === +b.dataset.new); g.code = newCode(); save(); cloudRoster([g]); renderSetup(); }));
   $('addG').onclick = () => { const n = S.roster.length + 1; if (n > 50) return; const g = { n, name: '', code: newCode() }; S.roster.push(g); save(); cloudRoster([g]); renderSetup(); };
   renderCloud();
+  w.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => {
+    const g = S.roster.find((x) => x.n === +b.dataset.show);
+    b.textContent = b.textContent.startsWith('•') ? g.code : '••••••';
+  }));
   $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = S.sens; save(); };
   $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
   $('wipe').onclick = async (e) => {
@@ -784,6 +807,7 @@ async function cloudCheck() {
     }
   } catch {}
   if (view === 'setup' && trainerOk) renderCloud();
+  if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
   if (cloudTrainer) { cloudRoster(S.roster); cloudRetry(); cloudPrune(); }
 }
 const codeHash = async (n, code) => {
@@ -861,6 +885,9 @@ function renderCloud() {
   if ($('cSync')) $('cSync').onclick = async () => { $('cMsg').textContent = 'Sender …'; await cloudRoster(S.roster); await cloudRetry(); $('cMsg').textContent = 'Færdig.'; };
 }
 if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
+
+let lockT = null;
+document.addEventListener('pointerdown', () => { clearTimeout(lockT); lockT = setTimeout(() => { if (trainerOk) { trainerOk = false; if (view === 'clips' || view === 'setup') show(view); } }, 10 * 60 * 1000); }, true);
 
 // ---------- Status ----------
 let toastT = null;
