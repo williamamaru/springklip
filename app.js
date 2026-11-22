@@ -762,11 +762,46 @@ function pinScreen(wrap, title, onOk) {
   $('pinIn').focus();
 }
 
+// Trænerens liste: klip på denne enhed + klip i skyen (fx optaget på en anden enhed).
+let remoteCache = new Map();
+async function allClips() {
+  const local = await listClips();
+  if (!cloudTrainer) return local;
+  const { data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d').order('at', { ascending: false }).limit(500);
+  if (error) return local;
+  remoteCache = new Map();
+  const byId = new Map(local.map((c) => [c.id, c]));
+  const out = local.slice();
+  for (const r of data || []) {
+    const m = { id: r.id, g: r.g, at: Date.parse(r.at), dur: r.dur, path: r.path, thumb: r.thumb, d: r.d, cloud: true, remote: true };
+    remoteCache.set(r.id, m);
+    const l = byId.get(r.id);
+    if (!l) out.push(m);
+    else { l.cloud = true; if (l.g !== r.g) l.g = r.g; } // skyen vinder, hvis det er rettet på en anden enhed
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+async function getAny(id) {
+  const c = await getClip(id);
+  if (c) return c;
+  const m = remoteCache.get(id);
+  if (!m || !sb) return null;
+  const { data } = await sb.storage.from('clips').createSignedUrl(m.path, 3600);
+  return { ...m, url: data?.signedUrl || null };
+}
+async function delAny(id) {
+  const c = await getClip(id);
+  if (c) await delClip(id);
+  const path = c?.path || remoteCache.get(id)?.path;
+  if (cloudTrainer && (c?.cloud || remoteCache.has(id)) && path) { await sb.storage.from('clips').remove([path]); await sb.from('clips').delete().eq('id', id); }
+}
+
 async function renderClips() {
   assigning = false;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
-  const list = await listClips();
+  w.innerHTML = w.innerHTML || '<p class="muted">Henter klip …</p>';
+  const list = await allClips();
   const onlyUnk = w.dataset.unk === '1';
   const shown = onlyUnk ? list.filter((c) => !c.g) : list;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
@@ -774,7 +809,7 @@ async function renderClips() {
       <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
-    <p class="muted">${list.length} klip på denne enhed${cloudTrainer ? ` · ${list.filter((c) => c.cloud).length} sendt til skyen` : ' · ikke logget ind i skyen (se Opsætning)'}. Klip med orange kant mangler et nummer: vælg gymnasten i listen.</p>
+    <p class="muted">${list.length} klip${cloudTrainer ? ` · ${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : ' på denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
     ${shown.length ? `<div class="grid">${shown.map((c) => `
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
@@ -785,16 +820,12 @@ async function renderClips() {
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
   if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
   $('lockBtn').onclick = () => { trainerOk = false; renderClips(); };
-  w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = () => openClip(b.dataset.play)));
+  w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = async () => { const c = await getAny(b.dataset.play); if (c) openClip(c); }));
   w.querySelectorAll('[data-g]').forEach((s) => (s.onchange = async () => {
     await setClipG(s.dataset.g, +s.value); renderClips();
   }));
   w.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
-    if (b.dataset.sure) {
-      const c = await getClip(b.dataset.del);
-      await delClip(b.dataset.del); renderClips();
-      if (c?.cloud && cloudTrainer) { await sb.storage.from('clips').remove([c.path]); await sb.from('clips').delete().eq('id', c.id); }
-    }
+    if (b.dataset.sure) { await delAny(b.dataset.del); renderClips(); }
     else { b.dataset.sure = '1'; b.textContent = 'Tryk igen for at slette'; }
   }));
 }
@@ -803,41 +834,43 @@ let mineData = null; // { n, name, clips:[{id,at,dur,thumb,url}] } fra skyen
 // Hurtig tildeling: ét ukendt klip ad gangen, tryk på gymnastens nummer.
 let asUrl = null, assigning = false;
 async function setClipG(id, g) {
-  const c = await getClip(id); if (!c) return;
-  c.g = g; await putClip(c);
-  if (c.cloud && cloudTrainer) { const { error } = await sb.from('clips').update({ g }).eq('id', id); if (error) toast('Kunne ikke rette i skyen'); }
+  const c = await getClip(id);
+  if (c) { c.g = g; await putClip(c); }
+  if (cloudTrainer && (c?.cloud || remoteCache.has(id))) {
+    const { error } = await sb.from('clips').update({ g }).eq('id', id);
+    if (error) toast('Kunne ikke rette i skyen'); else if (remoteCache.has(id)) remoteCache.get(id).g = g;
+  }
 }
 async function renderAssign(skip) {
   assigning = true;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
-  const unk = (await listClips()).filter((c) => !c.g).reverse(); // ældste først
+  const unk = (await allClips()).filter((c) => !c.g).reverse(); // ældste først
   if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; }
   if (!unk.length || skip >= unk.length) {
     w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer. 👏'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
     $('asBack').onclick = renderClips; return;
   }
-  const c = await getClip(unk[skip].id);
+  const c = await getAny(unk[skip].id);
   const named = S.roster.filter((g) => g.name);
   const list = named.length ? named : S.roster;
   w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
       <button id="asDone">Færdig</button></div>
     <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
-      ${c.blob ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${c.thumb}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
+      ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${c.thumb}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
     </div>
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr));margin-top:12px">
       ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b>${g.name ? `<span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span>` : ''}</button>`).join('')}
     </div>
     <div class="row" style="margin-top:12px"><button id="asSkip">Spring over</button><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
-  if (c.blob) { asUrl = URL.createObjectURL(c.blob); const v = $('asV'); v.src = asUrl; v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
+  if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else v.src = c.url; v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
   else $('asSlow').hidden = true;
   w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { await setClipG(c.id, +b.dataset.as); toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
   $('asSkip').onclick = () => renderAssign(skip + 1);
   $('asDone').onclick = () => { if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; } renderClips(); };
   $('asDel').onclick = async (e) => {
     if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
-    await delClip(c.id);
-    if (c.cloud && cloudTrainer) { await sb.storage.from('clips').remove([c.path]); await sb.from('clips').delete().eq('id', c.id); }
+    await delAny(c.id);
     renderAssign(skip);
   };
 }
