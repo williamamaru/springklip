@@ -155,9 +155,11 @@ let capToken = 0;
 function capLoop() {
   if (!running) return;
   const my = ++capToken;
-  const step = () => {
+  const step = (_n, meta) => {
     if (!running || my !== capToken) return;
-    const t = now();
+    // kameraets eget tidsstempel giver jævne afstande mellem billederne (glattere afspilning)
+    const mt = meta && (meta.captureTime || meta.expectedDisplayTime);
+    const t = mt ? mt / 1000 : now();
     if (t - lastCap >= 1 / 31 && cam.readyState >= 2) {
       lastCap = t;
       onFrame(t);
@@ -167,20 +169,35 @@ function capLoop() {
   };
   step();
 }
+// JPEG-komprimeringen sker i en baggrundstråd (enc.js), så den ikke stjæler tid fra visningen.
+let encW = null, encPending = 0;
+try { if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype.convertToBlob && window.createImageBitmap) encW = new Worker('enc.js'); } catch { encW = null; }
+if (encW) encW.onmessage = (e) => {
+  encPending--;
+  if (e.data.blob) addFrame(e.data.t, e.data.blob);
+  else if (e.data.err) { encW = null; } // baggrundstråden kan ikke: brug den gamle metode
+};
+function addFrame(t, blob) {
+  const f = { t, blob };
+  if (!ring.length || ring[ring.length - 1].t <= t) ring.push(f);
+  else { let i = ring.length - 1; while (i > 0 && ring[i - 1].t > t) i--; ring.splice(i, 0, f); }
+  const cut = now() - bufferSec();
+  let i = 0;
+  while (i < ring.length && ring[i].t < cut && !(lockFrom !== null && ring[i].t >= lockFrom)) i++;
+  if (i) { for (const old of ring.splice(0, i)) dropDecoded(old); }
+}
 function onFrame(t) {
-  // gem et komprimeret billede i ringbufferen
-  if (pending < 3) {
-    updCap();
+  updCap();
+  if (encW) {
+    if (encPending < 4) {
+      encPending++;
+      const w = CAP_W, h = CAP_H, ww = encW;
+      createImageBitmap(cam).then((bmp) => ww.postMessage({ bmp, t, w, h, q: 0.75 }, [bmp])).catch(() => { encPending--; });
+    }
+  } else if (pending < 3) {
     capX.drawImage(cam, 0, 0, CAP_W, CAP_H);
     pending++;
-    capC.toBlob((b) => {
-      pending--;
-      if (b) ring.push({ t, blob: b });
-      const cut = now() - bufferSec();
-      let i = 0;
-      while (i < ring.length && ring[i].t < cut && !(lockFrom !== null && ring[i].t >= lockFrom)) i++;
-      if (i) ring.splice(0, i);
-    }, 'image/jpeg', 0.75);
+    capC.toBlob((b) => { pending--; if (b) addFrame(t, b); }, 'image/jpeg', 0.75);
   }
   motion(t);
   maybeReadTags(t);
@@ -191,7 +208,25 @@ const screen = $('screen');
 const sx = screen.getContext('2d');
 const LET = ['A', 'B', 'C', 'D'];
 let lags = S.delays.slice(), paused = false, pausedAt = [0, 0, 0, 0], sel = 0, zoneEdit = null, zoneMode = false;
-const vs = [0, 1, 2, 3].map(() => ({ bmp: null, idx: -1, dec: false }));
+const vs = [0, 1, 2, 3].map(() => ({ cur: null, idx: -1 }));
+// Billeder afkodes et par billeder før de skal vises, så der altid ligger et klar. Afkodede billeder deles mellem visningerne.
+const decoded = new Set();
+function ensureDecoded(f) {
+  if (!f || f.bmp || f.dec) return;
+  const p = createImageBitmap(f.blob);
+  f.dec = p.then((b) => { f.dec = null; if (f.gone) { b.close && b.close(); return; } f.bmp = b; decoded.add(f); }).catch(() => { f.dec = null; });
+}
+function dropDecoded(f) {
+  f.gone = true;
+  if (f.bmp) { if (!vs.some((v) => v.cur === f)) { f.bmp.close && f.bmp.close(); f.bmp = null; } decoded.delete(f); }
+}
+function pruneDecoded(ts) {
+  for (const f of decoded) {
+    if (vs.some((v) => v.cur === f)) continue;
+    if (ts.some((t) => f.t > t - 0.25 && f.t < t + 0.4)) continue;
+    f.bmp && f.bmp.close && f.bmp.close(); f.bmp = null; decoded.delete(f);
+  }
+}
 function resetLags() { lags = S.delays.slice(); paused = false; $('pause').textContent = 'Pause'; }
 function viewT(i) { return paused ? pausedAt[i] : now() - lags[i]; }
 function findFrame(t) {
@@ -239,7 +274,7 @@ function drawLoop() {
   const cw = Math.round(screen.clientWidth * dpr), ch = Math.round(screen.clientHeight * dpr);
   if (!cw || !ch) return;
   if (screen.width !== cw || screen.height !== ch) { screen.width = cw; screen.height = ch; }
-  if (!running && !vs[0].bmp) return;
+  if (!running && !vs[0].cur) return;
   sx.fillStyle = '#000'; sx.fillRect(0, 0, cw, ch);
   if (zoneMode) {
     const R = fitRect(cw, ch);
@@ -249,26 +284,30 @@ function drawLoop() {
     return;
   }
   const P = panes(cw, ch), have = ring.length ? now() - ring[0].t : 0;
+  const viewTs = [];
   P.forEach((p, i) => {
     const v = vs[i], t = viewT(i), idx = findFrame(t);
-    if (idx >= 0 && idx !== v.idx && !v.dec) {
-      v.dec = true;
-      const f = ring[idx];
-      createImageBitmap(f.blob).then((bmp) => { if (v.bmp && v.bmp.close) v.bmp.close(); v.bmp = bmp; v.idx = idx; v.dec = false; }).catch(() => { v.dec = false; });
+    viewTs.push(t);
+    if (idx >= 0) {
+      for (let k = idx; k < Math.min(ring.length, idx + 4); k++) ensureDecoded(ring[k]);
+      if (ring[idx].bmp) { v.cur = ring[idx]; v.idx = idx; }
     }
     const behind = Math.max(0, now() - t);
     const filling = !paused && (idx < 0 || have + 0.5 < behind);
-    const src = filling ? null : v.bmp;
+    const vb = v.cur && v.cur.bmp;
+    const src = filling ? null : vb;
     const R = fitRect(p.w, p.h, p.x, p.y, src ? src.width : CAP_W, src ? src.height : CAP_H);
     // mens forsinkelsen fyldes op, vises live-billedet, så man kan se at kameraet virker
     if (filling && cam.readyState >= 2) drawImg(cam, R);
-    else if (v.bmp) drawImg(v.bmp, R);
+    else if (vb) drawImg(vb, R);
     else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Venter på kameraet …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
     const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
     const sub = paused ? 'pause' : filling ? `forsinkelse om ${Math.max(1, Math.ceil(behind - have))} s` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : '');
     label(R.x + 10 * dpr, R.y + 10 * dpr, txt, S.clipOn === false && i === 0 && !paused ? (sub ? sub + ' · klip fra' : 'klip fra') : sub, dpr, P.length > 1 && i === sel);
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });
+  for (let i = P.length; i < 4; i++) vs[i].cur = null;
+  pruneDecoded(viewTs);
 }
 requestAnimationFrame(drawLoop);
 
@@ -550,28 +589,46 @@ function maybeReadTags(t) {
   if (!vw) return;
   const sc = Math.min(1, 1920 / vw);
   const w = Math.round(vw * sc), h = Math.round(vh * sc);
+  tagBusy = true;
+  if (typeof OffscreenCanvas !== 'undefined' && window.createImageBitmap) {
+    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: S.roster.length }, [bmp])).catch(() => { tagBusy = false; });
+    return;
+  }
   if (tagC.width !== w) { tagC.width = w; tagC.height = h; }
   tagX.drawImage(cam, 0, 0, w, h);
   const img = tagX.getImageData(0, 0, w, h);
-  tagBusy = true;
   worker.postMessage({ w, h, buf: img.data.buffer, t, maxId: S.roster.length }, [img.data.buffer]);
 }
 const recentTags = []; // {g, t}
+const bgTags = []; // stillestående skilt-lignende mønstre i baggrunden
 const log = [];
 function finishSpring(s) {
   log.push({ vt: s.vt, dur: Math.round((s.end - s.start) * 10) / 10, votes: Object.fromEntries(Object.entries(s.votes).map(([k, v]) => [k, v.n])) });
-    // et rigtigt skilt ses i flere billeder i træk og flytter sig ikke vildt mellem dem
+    // Regler for at et nummer tæller:
+  // 1) set mindst 3 gange i vinduet efter landingen og ikke spredt over hele billedet
+  // 2) ikke en stillestående "skilt-lignende" ting i baggrunden: står den helt stille og er set samme sted
+  //    ved et tidligere spring, er det baggrunden (en gymnast bevæger sig altid lidt)
+  // 3) vinderen skal være tydeligt mere set end nummer to, ellers hellere "ukendt" end forkert
   const spread = (a) => Math.max(...a) - Math.min(...a);
-  const ranked = Object.entries(s.votes)
-    .map(([id, v]) => ({ id: +id, w: v.w, n: v.n, ok: v.n >= 3 && spread(v.xs) < 0.5 && spread(v.ys) < 0.5 }))
-    .filter((r) => r.ok).sort((a, b) => b.w - a.w);
-  // hvis topnummeret lige har fået et spring, og et andet nummer også er set tydeligt, er det nok det andet
-  const taken = new Set(recentTags.filter((r) => s.end - r.t < 8 && r.t !== s.end).map((r) => r.g));
-  let pick = ranked[0];
-  if (pick && taken.has(pick.id)) {
-    const alt = ranked.find((r) => !taken.has(r.id) && r.w >= pick.w * 0.4 && r.n >= 3);
-    if (alt) pick = alt;
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const cand = [];
+  for (const [id, v] of Object.entries(s.votes)) {
+    const sx = spread(v.xs), sy = spread(v.ys), mx = mean(v.xs), my = mean(v.ys);
+    const still = sx < 0.012 && sy < 0.012;
+    let artifact = false;
+    if (still) {
+      const a = bgTags.find((b) => b.id === +id && Math.abs(b.x - mx) < 0.02 && Math.abs(b.y - my) < 0.02);
+      if (a) { a.n++; artifact = true; } else bgTags.push({ id: +id, x: mx, y: my, n: 1 });
+    }
+    if (!artifact && sx < 0.5 && sy < 0.5) cand.push({ id: +id, w: v.w, n: v.n });
   }
+  cand.sort((x, y) => y.w - x.w);
+  const taken = new Set(recentTags.filter((r) => s.end - r.t < 8 && r.t !== s.end).map((r) => r.g));
+  let ok = cand.filter((c) => c.n >= 3);
+  if (ok.length && taken.has(ok[0].id)) { const alt = ok.find((c) => !taken.has(c.id) && c.w >= ok[0].w * 0.4); if (alt) ok = [alt, ...ok.filter((c) => c !== alt)]; }
+  let pick = ok[0];
+  const runner = cand.find((c) => pick && c.id !== pick.id);
+  if (pick && runner && pick.w < runner.w * 1.5) pick = null;
   s.g = pick ? pick.id : 0;
   if (s.g) recentTags.push({ g: s.g, t: s.end });
   while (recentTags.length > 20) recentTags.shift();
@@ -1151,7 +1208,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123000923';
+const APP_VERSION = '20261123002749';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
@@ -1170,5 +1227,5 @@ async function checkVersion() {
 checkVersion(); setInterval(checkVersion, 5 * 60 * 1000);
 
 // til test
-window.__springklip = { springs: () => springs, listClips, S, log };
+window.__springklip = { springs: () => springs, listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }

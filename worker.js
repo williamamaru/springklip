@@ -3,11 +3,20 @@ importScripts('lib/cv.js', 'lib/aruco.js', 'lib/aruco_4x4_1000.js');
 
 const detector = new AR.Detector({ dictionaryName: 'ARUCO_4X4_1000', maxHammingDistance: 0 });
 
+let oc = null, ox = null;
 onmessage = (e) => {
-  const { w, h, buf, t, maxId } = e.data;
+  const { w, h, buf, bmp, t, maxId } = e.data;
   let found = [];
   try {
-    const markers = detector.detect({ width: w, height: h, data: new Uint8ClampedArray(buf) });
+    let data;
+    if (bmp) {
+      // billedet kommer som ImageBitmap: pixel-udlæsningen sker her i baggrunden i stedet for på siden
+      if (!oc || oc.width !== w || oc.height !== h) { oc = new OffscreenCanvas(w, h); ox = oc.getContext('2d', { willReadFrequently: true }); }
+      ox.drawImage(bmp, 0, 0, w, h);
+      bmp.close();
+      data = ox.getImageData(0, 0, w, h).data;
+    } else data = new Uint8ClampedArray(buf);
+    const markers = detector.detect({ width: w, height: h, data });
     found = markers
       .filter((m) => m.id >= 1 && m.id <= maxId)
       .map((m) => {
