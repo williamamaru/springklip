@@ -213,14 +213,15 @@ const vs = [0, 1, 2, 3].map(() => ({ cur: null, idx: -1 }));
 const decoded = new Set();
 const perf = { shown: 0, lastShown: null, fpsShown: 0, fpsCap: 0 };
 setInterval(() => {
-  perf.fpsShown = perf.shown / 2; perf.shown = 0;
+  if (view === 'live') perf.fpsShown = perf.shown / 2; // tallet fra sidst, Live var åben
+  perf.shown = 0;
   const r = ring.filter((f) => f.t > now() - 2);
   perf.fpsCap = r.length / 2;
   const el = document.getElementById('perfTxt');
   if (el) el.textContent = perfText();
 }, 2000);
 function perfText() {
-  return `Gemmer ${perf.fpsCap.toFixed(0)} billeder/sek. · viser ${perf.fpsShown.toFixed(0)} billeder/sek. · komprimering: ${encW ? 'i baggrunden' : 'på hovedtråden (langsommere)'} · tidsstempler: ${cam.requestVideoFrameCallback ? 'fra kameraet' : 'fra skærmen'} · billedstørrelse ${CAP_W}×${CAP_H}`;
+  return `Gemmer ${perf.fpsCap.toFixed(0)} billeder/sek. · viste ${perf.fpsShown.toFixed(0)} billeder/sek. under Live · komprimering: ${encW ? 'i baggrunden' : 'på hovedtråden (langsommere)'} · tidsstempler: ${cam.requestVideoFrameCallback ? 'fra kameraet' : 'fra skærmen'} · billedstørrelse ${CAP_W}×${CAP_H}`;
 }
 function ensureDecoded(f) {
   if (!f || f.bmp || f.dec) return;
@@ -1224,7 +1225,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123004056';
+const APP_VERSION = '20261123004136';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
