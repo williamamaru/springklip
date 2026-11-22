@@ -722,6 +722,7 @@ function show(v) {
   if (v === 'mine') renderMine();
   if (v === 'setup') renderSetup();
   if (v !== 'mine') mineG = null;
+  if (v !== 'setup') setupPulled = false;
 }
 function fmtTime(ms) {
   const d = new Date(ms);
@@ -757,6 +758,7 @@ function pinScreen(wrap, title, onOk) {
     if (first && v.length < 6) { $('pinErr').textContent = 'Koden skal have mindst 6 tegn.'; return; }
     const h = await sha(v);
     if (first) { S.trainerHash = h; save(); }
+    codeLock = false;
     if (h !== S.trainerHash) {
       S.pinFails = (S.pinFails || 0) + 1;
       if (S.pinFails >= 5) { S.pinLock = Date.now() + Math.min(60, 5 * 2 ** (S.pinFails - 5)) * 60000; }
@@ -965,6 +967,7 @@ function renderSetup() {
   w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = () => { const g = S.roster.find((x) => x.n === +b.dataset.new); g.code = newCode(); save(); cloudRoster([g]); renderSetup(); }));
   $('addG').onclick = () => { const n = S.roster.length + 1; if (n > 50) return; const g = { n, name: '', code: newCode() }; S.roster.push(g); save(); cloudRoster([g]); renderSetup(); };
   renderCloud();
+  if (cloudTrainer && trainerPin && !setupPulled) { setupPulled = true; rosterLink(false); }
   w.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => {
     const g = S.roster.find((x) => x.n === +b.dataset.show);
     b.textContent = b.textContent.startsWith('•') ? g.code : '••••••';
@@ -1050,10 +1053,15 @@ async function rosterLink(newPin) {
     await cloudRoster(S.roster, true); // sikrer at fingeraftryk og krypterede koder passer sammen
     if (view === 'setup') renderSetup();
   } catch {
-    S.rosterLinked = false; save();
-    toast('Koderne i skyen er låst med en anden trænerkode. Brug samme trænerkode som på den anden enhed.');
+    // navnene er ikke hemmelige: hent dem alligevel, men behold enhedens egne koder og send dem ikke op
+    const byN = new Map(S.roster.map((g) => [g.n, g]));
+    for (const r of data) { const g = byN.get(r.n); if (g) g.name = r.name || ''; else byN.set(r.n, { n: r.n, name: r.name || '', code: newCode() }); }
+    S.roster = [...byN.values()].sort((x, y) => x.n - y.n);
+    S.rosterLinked = false; codeLock = true; save();
+    if (view === 'setup') renderSetup();
   }
 }
+let codeLock = false, setupPulled = false;
 async function cloudRoster(list, force) {
   if (!cloudTrainer || !S.rosterLinked || !trainerPin) return; // sendes kun op, når trænerkoden er kendt (så koderne kan krypteres)
   if (!force && !trainerOk) return;
@@ -1120,8 +1128,9 @@ function renderCloud() {
     $('cUp').onclick = () => go(true);
     return;
   }
+  const lockWarn = codeLock ? `<p class="err" style="margin:0">Pigernes koder i skyen er låst med en anden trænerkode end den, du brugte her. Navnene er hentet, men koderne på denne enhed passer ikke. Lås op med samme trænerkode som på den første enhed (tryk "Skift trænerkode" nederst).</p>` : '';
   el.innerHTML = cloudTrainer
-    ? `<h3>Skyen: forbundet</h3><p class="muted">Logget ind som ${esc(cloudUser.email)}. Nye klip bliver sendt op automatisk. Gymnasterne ser deres egne på <b>williamamaru.github.io/springklip/#mine</b>.</p>
+    ? `<h3>Skyen: forbundet</h3>${lockWarn}<p class="muted">Logget ind som ${esc(cloudUser.email)}. Nye klip bliver sendt op automatisk. Gymnasterne ser deres egne på <b>williamamaru.github.io/springklip/#mine</b>.</p>
        <div class="row"><button id="cSync">Send navne, koder og manglende klip</button><button class="ghost" id="cOut">Log ud af skyen</button></div><p class="muted" id="cMsg"></p>`
     : `<h3>Skyen: venter på godkendelse</h3><p class="muted">Logget ind som ${esc(cloudUser.email)}, men kontoen er ikke godkendt som træner endnu. Når den er godkendt, så tryk "Tjek igen".</p>
        <div class="row"><button id="cAgain">Tjek igen</button><button class="ghost" id="cOut">Log ud af skyen</button></div>`;
@@ -1164,7 +1173,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123000127';
+const APP_VERSION = '20261123000326';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
