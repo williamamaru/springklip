@@ -771,7 +771,7 @@ async function renderClips() {
   const shown = onlyUnk ? list.filter((c) => !c.g) : list;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
-      ${list.some((c) => !c.g) ? `<button id="assignBtn" class="acc">Tildel ukendte (${list.filter((c) => !c.g).length})</button>` : ''}
+      <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
     <p class="muted">${list.length} klip på denne enhed${cloudTrainer ? ` · ${list.filter((c) => c.cloud).length} sendt til skyen` : ' · ikke logget ind i skyen (se Opsætning)'}. Klip med orange kant mangler et nummer: vælg gymnasten i listen.</p>
