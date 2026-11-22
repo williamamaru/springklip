@@ -965,7 +965,9 @@ async function renderMine() {
     w.innerHTML = `<form class="pin" id="mineF"><h2>Mine spring</h2>
       <p class="muted">Skriv din personlige kode (6 tegn). Du kan kun se dine egne spring.</p>
       <input id="mineIn" type="text" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="6" aria-label="Personlig kode">
-      <button class="acc" id="mineGo">Vis mine spring</button><p class="err" id="mineErr"></p></form>`;
+      <button class="acc" id="mineGo">Vis mine spring</button><p class="err" id="mineErr"></p>
+      ${document.body.classList.contains('gymnast') ? '<p class="muted" style="font-size:14px;margin-top:18px">Træner? <a href="./" id="toTrainer" style="color:var(--acc)">Gå til trænersiden</a></p>' : ''}</form>`;
+    if ($('toTrainer')) $('toTrainer').onclick = (e) => { e.preventDefault(); location.hash = ''; document.body.classList.remove('gymnast'); history.replaceState(null, '', location.pathname); show('live'); };
     $('mineF').onsubmit = async (e) => {
       e.preventDefault();
       const code = $('mineIn').value.trim().toUpperCase();
@@ -1225,7 +1227,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123004136';
+const APP_VERSION = '20261123004651';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
