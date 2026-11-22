@@ -41,6 +41,7 @@ main{min-height:0;overflow:hidden;position:relative}
 .stage{position:relative;background:#000;min-height:0}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
 #screen{position:absolute;inset:0;width:100%;height:100%;touch-action:none;z-index:1}
+.startbox,.zonehelp,.toast,.drag{z-index:3}
 .lag{position:absolute;top:12px;left:12px;background:#000c;padding:6px 12px;border-radius:8px;font-size:28px;font-weight:800;font-variant-numeric:tabular-nums}
 .lag small{font-size:14px;font-weight:500;color:var(--muted);margin-left:6px}
 .toast{position:absolute;top:12px;right:12px;background:var(--acc);color:var(--acc-ink);padding:8px 14px;border-radius:8px;font-weight:700;font-size:18px;max-width:60%}
@@ -134,7 +135,10 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
       <div class="toast" id="toast" hidden></div>
       <div class="drag" id="dragBox" hidden></div>
       <div class="zonehelp" id="zoneHelp" hidden>
-        <span>Træk et felt hen over luften over trampetten, hvor gymnasterne er i luften.</span>
+        <span>Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.</span>
+        <input id="zoneName" type="text" aria-label="Navn på opstilling" style="width:160px">
+        <button id="zoneClear">Ryd felter</button>
+        <button id="zoneDel" class="bad ghost">Slet opstilling</button>
         <button class="acc" id="zoneDone">Færdig</button>
       </div>
       <div class="startbox" id="startBox">
@@ -152,6 +156,9 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
       <div class="grp scrubg">
         <input id="scrub" type="range" min="0" max="1000" value="1000" aria-label="Spol i optagelsen">
         <span id="scrubTxt">Live</span>
+      </div>
+      <div class="grp">
+        <select id="presetSel" aria-label="Opstilling: hvilket redskab tæller som spring" style="width:auto;min-width:130px;font-weight:700"></select>
       </div>
       <div class="grp seg" id="layoutSeg" role="group" aria-label="Antal billeder">
         <button data-n="1" aria-label="Ét billede">1</button><button data-n="2" aria-label="To billeder">2</button><button data-n="4" aria-label="Fire billeder">4</button>

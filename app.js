@@ -12,6 +12,10 @@ const KEY = 'springklip.v1';
 const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 10, trainerHash: '', roster: [] };
 let S;
 try { S = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { S = { ...DEF }; }
+// opstillinger: hver har sit navn (fx Trampet, Bane) og sine luftfelter
+if (!Array.isArray(S.presets) || !S.presets.length) S.presets = [{ name: 'Trampet', zones: [S.zone || DEF.zone] }, { name: 'Bane', zones: [] }];
+if (!(S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
+const preset = () => S.presets[S.pi];
 if (!Array.isArray(S.delays) || S.delays.length < 4) S.delays = [S.delay ?? 30, 33, 36, 39];
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} };
 if (!S.roster.length) {
@@ -372,42 +376,72 @@ function wake() {
 document.addEventListener('pointerdown', wake, true);
 wake();
 
-// ---------- Luftfelt ----------
+// ---------- Luftfelt og opstillinger ----------
+// Et luftfelt er et område af billedet over redskabet, hvor gymnasterne er i luften.
+// Bevægelse i et af den valgte opstillings felter = et spring. Andre baner i billedet tæller ikke.
 function drawZone(R, editing) {
-  const z = zoneEdit || S.zone;
-  const x = R.x + z.x0 * R.w, y = R.y + z.y0 * R.h, w = (z.x1 - z.x0) * R.w, h = (z.y1 - z.y0) * R.h;
+  const zs = (editing ? zoneEdit : preset().zones) || [];
   sx.save();
-  sx.fillStyle = editing ? '#f29a1f33' : '#f29a1f18';
-  sx.fillRect(x, y, w, h);
-  sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * Math.min(2, devicePixelRatio || 1);
-  sx.strokeRect(x, y, w, h);
+  sx.lineWidth = 3 * Math.min(2, devicePixelRatio || 1);
+  zs.concat(dragZone ? [dragZone] : []).forEach((z) => {
+    const x = R.x + z.x0 * R.w, y = R.y + z.y0 * R.h, w = (z.x1 - z.x0) * R.w, h = (z.y1 - z.y0) * R.h;
+    sx.fillStyle = editing ? '#f29a1f33' : '#f29a1f18'; sx.fillRect(x, y, w, h);
+    sx.strokeStyle = '#f29a1f'; sx.strokeRect(x, y, w, h);
+  });
   sx.restore();
 }
-$('zoneBtn').onclick = () => {
-  if (!running) { toast('Start kameraet først'); return; }
-  zoneMode = true; zoneEdit = { ...S.zone }; $('zoneHelp').hidden = false;
+function syncPresetUI() {
+  const sel = $('presetSel');
+  sel.innerHTML = S.presets.map((p, i) => `<option value="${i}"${i === S.pi ? ' selected' : ''}>${esc(p.name)}${p.zones.length ? '' : ' (intet felt)'}</option>`).join('') + '<option value="new">＋ Ny opstilling</option>';
+}
+function openZoneEdit() {
+  if (!running) { toast('Start kameraet først'); syncPresetUI(); return; }
+  zoneMode = true; zoneEdit = preset().zones.map((z) => ({ ...z }));
+  $('zoneName').value = preset().name;
+  $('zoneDel').hidden = S.presets.length < 2;
+  $('zoneHelp').hidden = false;
+}
+$('presetSel').onchange = (e) => {
+  if (e.target.value === 'new') {
+    S.presets.push({ name: `Opstilling ${S.presets.length + 1}`, zones: [] });
+    S.pi = S.presets.length - 1;
+  } else S.pi = +e.target.value;
+  save(); syncPresetUI(); prevMot = null; active = null;
+  if (!preset().zones.length) openZoneEdit(); else toast(`Springgenkendelse: ${preset().name}`);
+};
+syncPresetUI();
+$('zoneBtn').onclick = openZoneEdit;
+$('zoneClear').onclick = () => { zoneEdit = []; };
+$('zoneDel').onclick = (e) => {
+  if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
+  delete e.target.dataset.sure; e.target.textContent = 'Slet opstilling';
+  S.presets.splice(S.pi, 1); S.pi = 0; save();
+  zoneMode = false; zoneEdit = null; $('zoneHelp').hidden = true; syncPresetUI();
 };
 $('zoneDone').onclick = () => {
   zoneMode = false; $('zoneHelp').hidden = true;
-  if (zoneEdit) { S.zone = zoneEdit; save(); }
-  zoneEdit = null; prevMot = null;
-  toast('Luftfeltet er gemt');
+  const p = preset();
+  if (zoneEdit) p.zones = zoneEdit;
+  p.name = $('zoneName').value.trim() || p.name;
+  save(); syncPresetUI();
+  zoneEdit = null; prevMot = null; active = null;
+  toast(p.zones.length ? `${p.name}: ${p.zones.length} felt${p.zones.length > 1 ? 'er' : ''} gemt` : `${p.name} har intet felt, så der findes ingen spring`);
 };
-let dragFrom = null;
+let dragFrom = null, dragZone = null;
 screen.addEventListener('pointerdown', (e) => {
   if (!zoneMode) return;
-  const p = toNorm(e); dragFrom = p; zoneEdit = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+  const p = toNorm(e); dragFrom = p; dragZone = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
   screen.setPointerCapture(e.pointerId);
 });
 screen.addEventListener('pointermove', (e) => {
   if (!zoneMode || !dragFrom) return;
   const p = toNorm(e);
-  zoneEdit = { x0: Math.min(dragFrom.x, p.x), y0: Math.min(dragFrom.y, p.y), x1: Math.max(dragFrom.x, p.x), y1: Math.max(dragFrom.y, p.y) };
+  dragZone = { x0: Math.min(dragFrom.x, p.x), y0: Math.min(dragFrom.y, p.y), x1: Math.max(dragFrom.x, p.x), y1: Math.max(dragFrom.y, p.y) };
 });
 screen.addEventListener('pointerup', () => {
   if (!zoneMode) return;
-  dragFrom = null;
-  if (zoneEdit && (zoneEdit.x1 - zoneEdit.x0 < 0.05 || zoneEdit.y1 - zoneEdit.y0 < 0.05)) zoneEdit = { ...S.zone };
+  if (dragZone && dragZone.x1 - dragZone.x0 >= 0.04 && dragZone.y1 - dragZone.y0 >= 0.04 && zoneEdit.length < 4) zoneEdit.push(dragZone);
+  dragFrom = null; dragZone = null;
 });
 function toNorm(e) {
   const r = screen.getBoundingClientRect();
@@ -428,19 +462,18 @@ function motion(t) {
   const g = new Uint8Array(MOT_W * MOT_H);
   for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
   if (!prevMot) { prevMot = g; return; }
-  const z = S.zone;
-  const x0 = Math.floor(z.x0 * MOT_W), x1 = Math.ceil(z.x1 * MOT_W), y0 = Math.floor(z.y0 * MOT_H), y1 = Math.ceil(z.y1 * MOT_H);
-  let ch = 0, n = 0, allCh = 0;
-  for (let y = 0; y < MOT_H; y++) {
-    for (let x = 0; x < MOT_W; x++) {
-      const k = y * MOT_W + x;
-      const diff = Math.abs(g[k] - prevMot[k]) > 26;
-      if (diff) allCh++;
-      if (x >= x0 && x < x1 && y >= y0 && y < y1) { n++; if (diff) ch++; }
-    }
-  }
+  const diff = new Uint8Array(g.length);
+  let allCh = 0;
+  for (let k = 0; k < g.length; k++) if (Math.abs(g[k] - prevMot[k]) > 26) { diff[k] = 1; allCh++; }
   prevMot = g;
-  const frac = n ? (ch / n) * 100 : 0;
+  // højeste andel bevægelse i et af felterne (hvert felt måles for sig, så et lille felt ikke drukner)
+  let frac = 0;
+  for (const z of preset().zones) {
+    const x0 = Math.floor(z.x0 * MOT_W), x1 = Math.ceil(z.x1 * MOT_W), y0 = Math.floor(z.y0 * MOT_H), y1 = Math.ceil(z.y1 * MOT_H);
+    let ch = 0, n = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; ch += diff[y * MOT_W + x]; }
+    if (n) frac = Math.max(frac, (ch / n) * 100);
+  }
   const global = (allCh / g.length) * 100;
   const th = S.sens;
   const m = $('meter');
@@ -463,7 +496,7 @@ function motion(t) {
 }
 function newSpring(start, end) {
   springNo++;
-  const s = { id: `${Date.now()}-${springNo}`, start, end, vt: Math.round((cam.currentTime - (now() - start)) * 10) / 10, votes: {}, state: 'reading', wall: Date.now() - (now() - start) * 1000 };
+  const s = { id: `${Date.now()}-${springNo}`, d: preset().name, start, end, vt: Math.round((cam.currentTime - (now() - start)) * 10) / 10, votes: {}, state: 'reading', wall: Date.now() - (now() - start) * 1000 };
   springs.push(s);
   if (lockFrom === null || start - 1.5 < lockFrom) lockFrom = start - 1.5;
   toast(`Spring fundet · læser nummer …`);
@@ -561,7 +594,7 @@ async function makeClip(s, frames) {
   const mid = frames[Math.floor(frames.length / 2)];
   const thumb = await thumbOf(mid.blob);
   const dur = frames[frames.length - 1].t - frames[0].t;
-  const base = { id: s.id, at: s.wall, g: s.g || 0, dur: Math.round(dur * 10) / 10, thumb };
+  const base = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, dur: Math.round(dur * 10) / 10, thumb };
   const mime = pickMime();
   if (mime && recC.captureStream) {
     const first = await createImageBitmap(frames[0].blob);
@@ -727,7 +760,7 @@ async function renderClips() {
     ${shown.length ? `<div class="grid">${shown.map((c) => `
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
-        <div class="meta"><b>${esc(fmtTime(c.at))}</b>
+        <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
           <select data-g="${c.id}" aria-label="Gymnast">${opts(c.g)}</select>
           <button class="bad ghost" data-del="${c.id}">Slet</button></div></div>`).join('')}</div>`
       : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
@@ -786,7 +819,7 @@ async function renderMine() {
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2><button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
     ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" style="background-image:url('${c.thumb || ''}')" aria-label="Afspil"><span>${c.dur} s</span></button>
-      <div class="meta"><b>${esc(fmtTime(c.at))}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu.</div>'}`;
+      <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
   w.querySelectorAll('[data-i]').forEach((b) => (b.onclick = () => {
     const c = list[+b.dataset.i];
@@ -881,7 +914,7 @@ async function cloudUpload(c) {
   const path = `${c.id}.${ext}`;
   const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true });
   if (up.error) return false;
-  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb });
+  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null });
   if (ins.error) return false;
   const fresh = await getClip(c.id);
   if (fresh) { fresh.cloud = true; fresh.path = path; await putClip(fresh); }
