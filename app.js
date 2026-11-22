@@ -9,7 +9,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 // ---------- Opsætning ----------
 const KEY = 'springklip.v1';
-const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 14, trainerHash: '', roster: [] };
+const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 10, trainerHash: '', roster: [] };
 let S;
 try { S = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { S = { ...DEF }; }
 if (!Array.isArray(S.delays) || S.delays.length < 4) S.delays = [S.delay ?? 30, 33, 36, 39];
@@ -17,12 +17,13 @@ const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch
 if (!S.roster.length) {
   for (let n = 1; n <= 30; n++) S.roster.push({ n, name: '', code: '' });
 }
-S.roster.forEach((g) => { if (!g.code) g.code = newCode(); });
+S.roster.forEach((g) => { if (!g.code || g.code.length !== 6) g.code = newCode(); });
 save();
 function newCode() {
   const used = new Set((S?.roster || []).map((g) => g.code));
   let c;
-  do { c = String(1000 + Math.floor(Math.random() * 9000)); } while (used.has(c));
+  const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  do { const r = crypto.getRandomValues(new Uint32Array(6)); c = [...r].map((x) => A[x % A.length]).join(''); } while (used.has(c));
   return c;
 }
 const gName = (n) => {
@@ -507,7 +508,7 @@ async function makeClip(s, frames) {
     const first = await createImageBitmap(frames[0].blob);
     recX.drawImage(first, 0, 0, CAP_W, CAP_H); first.close && first.close();
     const st = recC.captureStream(30);
-    const rec = new MediaRecorder(st, { mimeType: mime, videoBitsPerSecond: 3_000_000 });
+    const rec = new MediaRecorder(st, { mimeType: mime, videoBitsPerSecond: 1_500_000 });
     const parts = [];
     rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
     const stopped = new Promise((r) => (rec.onstop = r));
@@ -525,7 +526,7 @@ async function makeClip(s, frames) {
     await stopped;
     st.getTracks().forEach((tr) => tr.stop());
     const blob = new Blob(parts, { type: mime.split(';')[0] });
-    if (blob.size > 1000) { await putClip({ ...base, blob, mime: blob.type }); refreshLists(); return; }
+    if (blob.size > 1000) { const c = { ...base, blob, mime: blob.type }; await putClip(c); refreshLists(); cloudUpload(c); return; }
   }
   // reserve: gem billederne og afspil dem i et canvas
   await putClip({ ...base, frames: frames.map((f) => ({ t: f.t - frames[0].t, blob: f.blob })) });
@@ -543,13 +544,17 @@ async function thumbOf(blob) {
 const plV = $('plVideo'), plC = $('plCanvas');
 let plUrl = null, plTimer = null, plRate = 1, plClip = null;
 async function openClip(id) {
-  const c = await getClip(id);
+  const c = typeof id === 'object' ? id : await getClip(id);
   if (!c) return;
   plClip = c; plRate = 1; $('plSlow').textContent = 'Slowmotion';
   $('plTitle').textContent = `${gName(c.g)} · ${fmtTime(c.at)}`;
   $('player').hidden = false;
-  if (plUrl) URL.revokeObjectURL(plUrl);
-  if (c.blob) {
+  if (plUrl) { URL.revokeObjectURL(plUrl); plUrl = null; }
+  if (c.url) {
+    plC.hidden = true; plV.hidden = false; plUrl = null;
+    plV.src = c.url; plV.playbackRate = 1; plV.play().catch(() => {});
+    $('plSave').hidden = true;
+  } else if (c.blob) {
     plC.hidden = true; plV.hidden = false;
     plUrl = URL.createObjectURL(c.blob);
     plV.src = plUrl; plV.playbackRate = 1; plV.play().catch(() => {});
@@ -582,10 +587,10 @@ $('plClose').onclick = () => { $('player').hidden = true; plV.pause(); clearTime
 $('plSlow').onclick = () => {
   plRate = plRate === 1 ? 0.4 : 1;
   $('plSlow').textContent = plRate === 1 ? 'Slowmotion' : 'Normal fart';
-  if (plClip?.blob) plV.playbackRate = plRate; else playFrames(plClip.frames);
+  if (plClip?.blob || plClip?.url) plV.playbackRate = plRate; else playFrames(plClip.frames);
 };
 $('plReplay').onclick = () => {
-  if (plClip?.blob) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
+  if (plClip?.blob || plClip?.url) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
 };
 
 // ---------- Visninger ----------
@@ -640,7 +645,7 @@ async function renderClips() {
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
       <button id="unkBtn" class="${onlyUnk ? 'acc' : ''}">Kun ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
-    <p class="muted">${list.length} klip på denne enhed. Klip med orange kant mangler et nummer: vælg gymnasten i listen.</p>
+    <p class="muted">${list.length} klip på denne enhed${cloudTrainer ? ` · ${list.filter((c) => c.cloud).length} sendt til skyen` : ' · ikke logget ind i skyen (se Opsætning)'}. Klip med orange kant mangler et nummer: vælg gymnasten i listen.</p>
     ${shown.length ? `<div class="grid">${shown.map((c) => `
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
@@ -653,37 +658,63 @@ async function renderClips() {
   w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = () => openClip(b.dataset.play)));
   w.querySelectorAll('[data-g]').forEach((s) => (s.onchange = async () => {
     const c = await getClip(s.dataset.g); c.g = +s.value; await putClip(c); renderClips();
+    if (c.cloud && cloudTrainer) { const { error } = await sb.from('clips').update({ g: c.g }).eq('id', c.id); if (error) toast('Kunne ikke rette i skyen'); }
   }));
   w.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
-    if (b.dataset.sure) { await delClip(b.dataset.del); renderClips(); }
+    if (b.dataset.sure) {
+      const c = await getClip(b.dataset.del);
+      await delClip(b.dataset.del); renderClips();
+      if (c?.cloud && cloudTrainer) { await sb.storage.from('clips').remove([c.path]); await sb.from('clips').delete().eq('id', c.id); }
+    }
     else { b.dataset.sure = '1'; b.textContent = 'Tryk igen for at slette'; }
   }));
 }
 
+let mineData = null; // { n, name, clips:[{id,at,dur,thumb,url}] } fra skyen
 async function renderMine() {
   const w = $('mineWrap');
   clearTimeout(idleT);
   if (!mineG) {
     w.innerHTML = `<form class="pin" id="mineF"><h2>Mine spring</h2>
-      <p class="muted">Skriv din personlige kode. Du kan kun se dine egne spring.</p>
-      <input id="mineIn" type="password" inputmode="numeric" autocomplete="off" maxlength="6" aria-label="Personlig kode">
-      <button class="acc">Vis mine spring</button><p class="err" id="mineErr"></p></form>`;
-    $('mineF').onsubmit = (e) => {
+      <p class="muted">Skriv din personlige kode (6 tegn). Du kan kun se dine egne spring.</p>
+      <input id="mineIn" type="text" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="6" aria-label="Personlig kode">
+      <button class="acc" id="mineGo">Vis mine spring</button><p class="err" id="mineErr"></p></form>`;
+    $('mineF').onsubmit = async (e) => {
       e.preventDefault();
-      const g = S.roster.find((x) => x.code === $('mineIn').value.trim());
-      if (!g) { $('mineErr').textContent = 'Koden passer ikke. Spørg din træner.'; return; }
-      mineG = g.n; renderMine();
+      const code = $('mineIn').value.trim().toUpperCase();
+      $('mineErr').textContent = '';
+      if (code.length !== 6) { $('mineErr').textContent = 'Koden har 6 tegn.'; return; }
+      $('mineGo').disabled = true; $('mineGo').textContent = 'Henter …';
+      let res = null;
+      if (sb) {
+        try {
+          const r = await fetch(`${SUPA_URL}/functions/v1/mine`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPA_KEY }, body: JSON.stringify({ code }) });
+          if (r.status === 429) { $('mineErr').textContent = 'For mange forkerte forsøg. Prøv igen om et kvarter.'; }
+          else if (r.ok) res = await r.json();
+        } catch {}
+      }
+      if (!res) {
+        const g = S.roster.find((x) => x.code === code);
+        if (g) res = { n: g.n, name: g.name, local: true };
+      }
+      $('mineGo').disabled = false; $('mineGo').textContent = 'Vis mine spring';
+      if (!res) { if (!$('mineErr').textContent) $('mineErr').textContent = 'Koden passer ikke. Spørg din træner.'; return; }
+      mineData = res; mineG = res.n; renderMine();
     };
     return;
   }
-  const list = await listClips(mineG);
-  const g = S.roster.find((x) => x.n === mineG);
-  w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(g?.name || 'Nr. ' + mineG)}: ${list.length} spring</h2><button class="acc" id="mineOut">Log ud</button></div>
-    ${list.length ? `<div class="grid">${list.map((c) => `<div class="clip"><button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
+  const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at) })) : await listClips(mineG);
+  const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
+  w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2><button class="acc" id="mineOut">Log ud</button></div>
+    <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
+    ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" style="background-image:url('${c.thumb || ''}')" aria-label="Afspil"><span>${c.dur} s</span></button>
       <div class="meta"><b>${esc(fmtTime(c.at))}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu.</div>'}`;
-  $('mineOut').onclick = () => { mineG = null; renderMine(); };
-  w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = () => openClip(b.dataset.play)));
-  idleT = setTimeout(() => { mineG = null; if (view === 'mine') renderMine(); }, 3 * 60 * 1000);
+  $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
+  w.querySelectorAll('[data-i]').forEach((b) => (b.onclick = () => {
+    const c = list[+b.dataset.i];
+    openClip(c.url ? { ...c, g: mineG } : c.id);
+  }));
+  idleT = setTimeout(() => { mineG = null; mineData = null; if (view === 'mine') renderMine(); }, 3 * 60 * 1000);
 }
 document.addEventListener('pointerdown', () => { if (mineG && view === 'mine') { clearTimeout(idleT); idleT = setTimeout(() => { mineG = null; renderMine(); }, 3 * 60 * 1000); } });
 
@@ -700,6 +731,7 @@ function renderSetup() {
       <div class="row"><button id="addG">Tilføj nummer</button>
       <a href="skilte/Nummerskilte_1-30.pdf" target="_blank" rel="noopener"><button>Nummerskilte 1–30 (PDF)</button></a></div>
     </div>
+    <div class="sec" id="cloudSec"></div>
     <div class="sec"><h3>Springgenkendelse</h3>
       <label>Følsomhed: kræver at <b id="sensV">${S.sens}</b> % af luftfeltet bevæger sig
         <input id="sens" type="range" min="0.3" max="6" step="0.1" value="${S.sens}" style="width:100%"></label>
@@ -714,11 +746,12 @@ function renderSetup() {
       <input id="testFile" type="file" accept="video/*">
     </div>
     <div class="sec"><h3>Trænerkode</h3><button id="newPin">Skift trænerkode</button></div>`;
-  w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { S.roster.find((g) => g.n === +i.dataset.name).name = i.value.trim(); save(); }));
-  w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = () => { S.roster.find((g) => g.n === +b.dataset.new).code = newCode(); save(); renderSetup(); }));
-  $('addG').onclick = () => { const n = S.roster.length + 1; if (n > 50) return; S.roster.push({ n, name: '', code: newCode() }); save(); renderSetup(); };
+  w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudRoster([g]); }));
+  w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = () => { const g = S.roster.find((x) => x.n === +b.dataset.new); g.code = newCode(); save(); cloudRoster([g]); renderSetup(); }));
+  $('addG').onclick = () => { const n = S.roster.length + 1; if (n > 50) return; const g = { n, name: '', code: newCode() }; S.roster.push(g); save(); cloudRoster([g]); renderSetup(); };
+  renderCloud();
   $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = S.sens; save(); };
-  $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 14); save(); };
+  $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
   $('wipe').onclick = async (e) => {
     const b = e.target;
     if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = 'Tryk igen for at slette alle klip'; return; }
@@ -728,6 +761,102 @@ function renderSetup() {
   $('testFile').onchange = (e) => { const f = e.target.files[0]; if (f) { show('live'); startCamera(f); } };
   $('newPin').onclick = () => { S.trainerHash = ''; save(); trainerOk = false; renderSetup(); };
 }
+
+// ---------- Skyen (Supabase) ----------
+// Klip sendes op, så gymnasterne kan se deres egne spring hjemme. Kun godkendte trænere kan uploade og se alt.
+const SUPA_URL = 'https://njunnxxyidmycxgspybd.supabase.co';
+const SUPA_KEY = 'sb_publishable_z_WF_jwdJPo0_G_gaenMvg_YcBs8GEx';
+let sb = null, cloudUser = null, cloudTrainer = false, cloudBusy = false;
+try { sb = window.supabase.createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: true, autoRefreshToken: true } }); } catch { sb = null; }
+async function cloudCheck() {
+  if (!sb) return;
+  try {
+    const { data } = await sb.auth.getSession();
+    cloudUser = data.session?.user || null;
+    cloudTrainer = false;
+    if (cloudUser) {
+      const { data: t } = await sb.from('trainers').select('user_id').eq('user_id', cloudUser.id).maybeSingle();
+      cloudTrainer = !!t;
+    }
+  } catch {}
+  if (view === 'setup' && trainerOk) renderCloud();
+  if (cloudTrainer) { cloudRoster(S.roster); cloudRetry(); cloudPrune(); }
+}
+const codeHash = async (n, code) => {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`springklip:${n}:${code}`));
+  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+};
+async function cloudRoster(list) {
+  if (!cloudTrainer) return;
+  const rows = await Promise.all(list.map(async (g) => ({ n: g.n, name: g.name, code_hash: await codeHash(g.n, g.code), updated_at: new Date().toISOString() })));
+  const { error } = await sb.from('gymnasts').upsert(rows);
+  if (error) toast('Navne og koder kunne ikke sendes til skyen');
+}
+async function cloudUpload(c) {
+  if (!cloudTrainer || !c.blob || c.cloud) return false;
+  const ext = c.blob.type.includes('mp4') ? 'mp4' : 'webm';
+  const path = `${c.id}.${ext}`;
+  const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true });
+  if (up.error) return false;
+  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb });
+  if (ins.error) return false;
+  const fresh = await getClip(c.id);
+  if (fresh) { fresh.cloud = true; fresh.path = path; await putClip(fresh); }
+  return true;
+}
+async function cloudRetry() {
+  if (!cloudTrainer || cloudBusy) return;
+  cloudBusy = true;
+  try {
+    const waiting = (await listClips()).filter((c) => !c.cloud);
+    for (const m of waiting) { const c = await getClip(m.id); if (c?.blob) await cloudUpload(c); }
+  } catch {}
+  cloudBusy = false;
+}
+setInterval(cloudRetry, 60_000);
+async function cloudPrune() {
+  if (!cloudTrainer) return;
+  const lim = new Date(Date.now() - S.keepDays * 864e5).toISOString();
+  const { data } = await sb.from('clips').select('id, path').lt('at', lim).limit(500);
+  if (!data?.length) return;
+  await sb.storage.from('clips').remove(data.map((r) => r.path));
+  await sb.from('clips').delete().in('id', data.map((r) => r.id));
+}
+function renderCloud() {
+  const el = $('cloudSec');
+  if (!el) return;
+  if (!sb) { el.innerHTML = '<h3>Skyen</h3><p class="muted">Forbindelsen til skyen kunne ikke startes.</p>'; return; }
+  if (!cloudUser) {
+    el.innerHTML = `<h3>Skyen: så gymnasterne kan se deres spring hjemme</h3>
+      <p class="muted">Log ind med trænerlogin. Så bliver hvert klip sendt op automatisk, og gymnasterne kan se deres egne på <b>williamamaru.github.io/springklip/#mine</b> med deres kode.</p>
+      <form id="cloudF" class="row" style="align-items:stretch">
+        <input id="cEmail" type="text" inputmode="email" autocomplete="username" placeholder="E-mail" aria-label="E-mail" style="flex:1 1 220px">
+        <input id="cPass" type="password" autocomplete="current-password" placeholder="Adgangskode" aria-label="Adgangskode" style="flex:1 1 180px">
+        <button class="acc" id="cIn">Log ind</button><button type="button" id="cUp">Opret trænerlogin</button>
+      </form><p class="err" id="cErr"></p>`;
+    const go = async (signup) => {
+      const email = $('cEmail').value.trim(), password = $('cPass').value;
+      if (!email || password.length < 8) { $('cErr').textContent = 'Skriv e-mail og en adgangskode på mindst 8 tegn.'; return; }
+      $('cErr').textContent = 'Et øjeblik …';
+      const r = signup ? await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }) : await sb.auth.signInWithPassword({ email, password });
+      if (r.error) { $('cErr').textContent = signup ? 'Kunne ikke oprette: ' + r.error.message : 'Forkert e-mail eller adgangskode (eller e-mailen er ikke bekræftet endnu).'; return; }
+      if (signup && !r.data.session) { $('cErr').textContent = 'Tjek din e-mail og tryk på linket for at bekræfte. Log derefter ind her.'; return; }
+      cloudCheck();
+    };
+    $('cloudF').onsubmit = (e) => { e.preventDefault(); go(false); };
+    $('cUp').onclick = () => go(true);
+    return;
+  }
+  el.innerHTML = cloudTrainer
+    ? `<h3>Skyen: forbundet</h3><p class="muted">Logget ind som ${esc(cloudUser.email)}. Nye klip bliver sendt op automatisk. Gymnasterne ser deres egne på <b>williamamaru.github.io/springklip/#mine</b>.</p>
+       <div class="row"><button id="cSync">Send navne, koder og manglende klip</button><button class="ghost" id="cOut">Log ud af skyen</button></div><p class="muted" id="cMsg"></p>`
+    : `<h3>Skyen: venter på godkendelse</h3><p class="muted">Logget ind som ${esc(cloudUser.email)}, men kontoen er ikke godkendt som træner endnu. Når den er godkendt, så tryk "Tjek igen".</p>
+       <div class="row"><button id="cAgain">Tjek igen</button><button class="ghost" id="cOut">Log ud af skyen</button></div>`;
+  $('cOut').onclick = async () => { await sb.auth.signOut(); cloudUser = null; cloudTrainer = false; renderCloud(); };
+  if ($('cAgain')) $('cAgain').onclick = cloudCheck;
+  if ($('cSync')) $('cSync').onclick = async () => { $('cMsg').textContent = 'Sender …'; await cloudRoster(S.roster); await cloudRetry(); $('cMsg').textContent = 'Færdig.'; };
+}
+if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
 
 // ---------- Status ----------
 let toastT = null;
@@ -748,6 +877,12 @@ $('startCam').onclick = () => startCamera();
 if (!navigator.mediaDevices?.getUserMedia) $('camErr').textContent = 'Denne browser kan ikke bruge kameraet. Brug Safari på iPad eller Chrome.';
 pruneOld().catch(() => {});
 setRec();
+cloudCheck();
+// gymnaster får linket .../#mine og ser kun "Mine spring"
+if (location.hash === '#mine') {
+  document.body.classList.add('gymnast');
+  show('mine');
+}
 
 // til test
 window.__springklip = { springs: () => springs, listClips, S, log };
