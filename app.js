@@ -123,6 +123,7 @@ async function startCamera(file) {
   $('startBox').hidden = true;
   resetLags();
   setRec();
+  setTimeout(() => { if (running && !cam.videoWidth) toast('Kameraet sender ingen billeder. Luk andre apps, der bruger kameraet, og genindlæs siden.'); }, 4000);
   keepAwake();
   capLoop();
 }
@@ -241,11 +242,14 @@ function drawLoop() {
       createImageBitmap(f.blob).then((bmp) => { if (v.bmp && v.bmp.close) v.bmp.close(); v.bmp = bmp; v.idx = idx; v.dec = false; }).catch(() => { v.dec = false; });
     }
     const R = fitRect(p.w, p.h, p.x, p.y);
-    if (v.bmp) drawImg(v.bmp, R);
-    else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Samler billeder op …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
     const behind = Math.max(0, now() - t);
-    const txt = (P.length > 1 ? LET[i] + '  ' : '') + (behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
-    const sub = paused ? 'pause' : (have + 0.5 < behind ? `venter · ${Math.round(have)} s optaget` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : ''));
+    const filling = !paused && (idx < 0 || have + 0.5 < behind);
+    // mens forsinkelsen fyldes op, vises live-billedet, så man kan se at kameraet virker
+    if (filling && cam.readyState >= 2) drawImg(cam, R);
+    else if (v.bmp) drawImg(v.bmp, R);
+    else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Venter på kameraet …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
+    const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
+    const sub = paused ? 'pause' : filling ? `forsinkelse om ${Math.max(1, Math.ceil(behind - have))} s` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : '');
     label(R.x + 10 * dpr, R.y + 10 * dpr, txt, sub, dpr, P.length > 1 && i === sel);
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });

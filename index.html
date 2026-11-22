@@ -39,7 +39,8 @@ main{min-height:0;overflow:hidden;position:relative}
 /* live */
 #live{display:grid;grid-template-rows:minmax(0,1fr) auto}
 .stage{position:relative;background:#000;min-height:0}
-#screen{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+#screen{position:absolute;inset:0;width:100%;height:100%;touch-action:none;z-index:1}
 .lag{position:absolute;top:12px;left:12px;background:#000c;padding:6px 12px;border-radius:8px;font-size:28px;font-weight:800;font-variant-numeric:tabular-nums}
 .lag small{font-size:14px;font-weight:500;color:var(--muted);margin-left:6px}
 .toast{position:absolute;top:12px;right:12px;background:var(--acc);color:var(--acc-ink);padding:8px 14px;border-radius:8px;font-weight:700;font-size:18px;max-width:60%}
@@ -106,6 +107,7 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
   <!-- LIVE -->
   <section class="view" id="live">
     <div class="stage" id="stage">
+      <video id="cam" playsinline muted autoplay></video>
       <canvas id="screen"></canvas>
       <div class="toast" id="toast" hidden></div>
       <div class="zonehelp" id="zoneHelp" hidden>
@@ -175,7 +177,6 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
   </div>
 </div>
 
-<video id="cam" playsinline muted autoplay style="position:fixed;width:2px;height:2px;opacity:.01;left:0;top:0;pointer-events:none"></video>
 <script src="lib/supabase.js"></script>
 <script src="app.js"></script>
 </body>
