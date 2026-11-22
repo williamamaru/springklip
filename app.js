@@ -266,7 +266,7 @@ function drawLoop() {
     else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Venter på kameraet …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
     const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
     const sub = paused ? 'pause' : filling ? `forsinkelse om ${Math.max(1, Math.ceil(behind - have))} s` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : '');
-    label(R.x + 10 * dpr, R.y + 10 * dpr, txt, sub, dpr, P.length > 1 && i === sel);
+    label(R.x + 10 * dpr, R.y + 10 * dpr, txt, S.clipOn === false && i === 0 && !paused ? (sub ? sub + ' · klip fra' : 'klip fra') : sub, dpr, P.length > 1 && i === sel);
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });
 }
@@ -422,6 +422,16 @@ $('presetSel').onchange = (e) => {
   if (!preset().zones.length) openZoneEdit(); else toast(`Springgenkendelse: ${preset().name}`);
 };
 syncPresetUI();
+// Klip til/fra: under teknik eller opvarmning kan klip slås fra, så der ikke bruges plads.
+// Den forsinkede visning kører videre som normalt.
+function syncClipUI() {
+  const on = S.clipOn !== false, b = $('clipBtn');
+  b.textContent = on ? 'Klip: til' : 'Klip: fra';
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', on);
+  setRec();
+}
+$('clipBtn').onclick = () => { S.clipOn = S.clipOn === false; save(); syncClipUI(); toast(S.clipOn ? 'Klip slået til: spring gemmes' : 'Klip slået fra: intet bliver gemt'); };
 $('zoneBtn').onclick = openZoneEdit;
 $('zoneClear').onclick = () => { zoneEdit = []; };
 $('zoneDel').onclick = (e) => {
@@ -492,6 +502,7 @@ function motion(t) {
   m.style.width = Math.min(100, (frac / (th * 3)) * 100) + '%';
   m.classList.toggle('hot', frac > th);
   if (global > 45) return; // kameraet justerer lys/fokus
+  if (S.clipOn === false) { active = null; motAbove = 0; return; } // klip slået fra, fx under teknik
   const above = frac > th;
   if (!active) {
     motAbove = above ? motAbove + 1 : 0;
@@ -1134,7 +1145,9 @@ async function setRec() {
   $('recDot').classList.toggle('on', running);
   const start = new Date(); start.setHours(0, 0, 0, 0);
   try { todayCount = (await listClips()).filter((c) => c.at >= start.getTime()).length; } catch {}
-  $('recTxt').innerHTML = running ? `Optager <span class="long">· ${todayCount} klip i dag</span>` : `Kamera slukket <span class="long">· ${todayCount} klip i dag</span>`;
+  const off = S.clipOn === false ? ' · klip slået fra' : '';
+  $('recTxt').innerHTML = running ? `${off ? 'Live' : 'Optager'}${off} <span class="long">· ${todayCount} klip i dag</span>` : `Kamera slukket${off} <span class="long">· ${todayCount} klip i dag</span>`;
+  $('recDot').classList.toggle('on', running && !off);
 }
 setInterval(setRec, 5000);
 
@@ -1143,6 +1156,7 @@ if (!navigator.mediaDevices?.getUserMedia) $('camErr').textContent = 'Denne brow
 pruneOld().catch(() => {});
 setRec();
 cloudCheck();
+syncClipUI();
 // gymnaster får linket .../#mine og ser kun "Mine spring"
 if (location.hash === '#mine') {
   document.body.classList.add('gymnast');
@@ -1150,7 +1164,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261122234533';
+const APP_VERSION = '20261123000127';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
