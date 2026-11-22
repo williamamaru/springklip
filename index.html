@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#101418">
+<title>Springklip</title>
+<style>
+/* VOICE: rolig trænerskærm i en larmende hal. IDEA: hallens storskærm/iPad på stativ.
+   PICTURE: det forsinkede kamerabillede fylder skærmen. COLOUR: mørk grafit, landingsmåttens orange som eneste accent.
+   TYPE: systemfont, store tal. LAYOUT: fanebjælke øverst, billede i midten, betjening nederst. */
+:root{--bg:#101418;--panel:#1a2027;--raise:#242c35;--line:#333d48;--ink:#eef2f5;--muted:#9aa7b4;--acc:#f29a1f;--acc-ink:#1d1203;--ok:#4cc38a;--bad:#ff7a6e;
+  font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);overflow:hidden}
+body{display:grid;grid-template-rows:auto minmax(0,1fr);padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+[hidden]{display:none!important}
+button,input,select{font:inherit;color:inherit}
+button{background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:8px 14px;min-height:44px;cursor:pointer;touch-action:manipulation}
+button:active{transform:translateY(1px)}
+button.acc{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:700}
+button.ghost{background:transparent}
+button.bad{color:var(--bad)}
+button:disabled{opacity:.4}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+input[type=text],input[type=number],input[type=password],select{background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-height:44px;width:100%}
+header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.logo{font-weight:800;font-size:20px;letter-spacing:.02em;margin-right:8px}
+.logo b{color:var(--acc)}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:transparent;border-color:transparent}
+nav button.on{background:var(--raise);border-color:var(--acc)}
+.rec{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:14px;font-variant-numeric:tabular-nums}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted)}
+.dot.on{background:#ff4b3e;box-shadow:0 0 0 4px #ff4b3e33}
+main{min-height:0;overflow:hidden;position:relative}
+.view{position:absolute;inset:0;overflow:auto}
+/* live */
+#live{display:grid;grid-template-rows:minmax(0,1fr) auto}
+.stage{position:relative;background:#000;min-height:0}
+#screen{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+.lag{position:absolute;top:12px;left:12px;background:#000c;padding:6px 12px;border-radius:8px;font-size:28px;font-weight:800;font-variant-numeric:tabular-nums}
+.lag small{font-size:14px;font-weight:500;color:var(--muted);margin-left:6px}
+.toast{position:absolute;top:12px;right:12px;background:var(--acc);color:var(--acc-ink);padding:8px 14px;border-radius:8px;font-weight:700;font-size:18px;max-width:60%}
+.startbox{position:absolute;inset:0;display:grid;place-items:center;padding:20px;background:var(--bg)}
+.startbox .card{max-width:520px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:grid;gap:12px}
+.startbox h1{margin:0;font-size:26px}
+.startbox p{margin:0;color:var(--muted)}
+.zonehelp{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);background:#000d;padding:8px 14px;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center}
+.bar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-top:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.bar .grp{display:flex;gap:6px;align-items:center}
+.bar .grow{flex:1}
+.bar label{font-size:14px;color:var(--muted)}
+#delayIn{width:84px;text-align:center;font-size:20px;font-weight:700}
+.meter{width:90px;height:10px;background:var(--raise);border-radius:5px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--ok)}
+.meter i.hot{background:var(--acc)}
+/* lister */
+.wrap{max-width:1100px;margin:0 auto;padding:16px}
+h2{font-size:22px;margin:4px 0 12px}
+.muted{color:var(--muted)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:12px}
+.clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:grid}
+.clip.unk{border-color:var(--acc)}
+.clip button.thumb{padding:0;border:0;border-radius:0;aspect-ratio:16/9;background:#000 center/cover no-repeat;position:relative}
+.clip button.thumb span{position:absolute;right:8px;bottom:8px;background:#000c;border-radius:6px;padding:2px 8px;font-size:13px}
+.clip .meta{padding:10px;display:grid;gap:8px}
+.clip .meta b{font-size:16px}
+.empty{border:1px dashed var(--line);border-radius:12px;padding:24px;color:var(--muted);text-align:center}
+table{width:100%;border-collapse:collapse}
+td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{font-size:13px;color:var(--muted);font-weight:600}
+td.num{width:60px;font-weight:800;font-size:20px}
+td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;white-space:nowrap}
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px;display:grid;gap:10px}
+.sec h3{margin:0;font-size:17px}
+.pin{max-width:360px;margin:8vh auto;display:grid;gap:12px;text-align:center}
+.pin input{text-align:center;font-size:28px;letter-spacing:.3em}
+.err{color:var(--bad);min-height:1.4em;margin:0}
+/* afspiller */
+.modal{position:fixed;inset:0;background:#000e;z-index:20;display:grid;grid-template-rows:auto minmax(0,1fr) auto;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+.modal .top,.modal .ctl{display:flex;gap:8px;align-items:center;padding:10px 12px;flex-wrap:wrap}
+.modal .top b{font-size:18px;flex:1}
+.modal video,.modal canvas{width:100%;height:100%;object-fit:contain;background:#000}
+@media (max-width:640px){.lag{font-size:20px}.rec span.long{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Spring<b>klip</b></div>
+  <nav id="tabs">
+    <button data-v="live" class="on">Live</button>
+    <button data-v="clips">Klip</button>
+    <button data-v="mine">Mine spring</button>
+    <button data-v="setup">Opsætning</button>
+  </nav>
+  <div class="rec"><i class="dot" id="recDot"></i><span id="recTxt">Kamera slukket</span></div>
+</header>
+<main>
+  <!-- LIVE -->
+  <section class="view" id="live">
+    <div class="stage" id="stage">
+      <canvas id="screen"></canvas>
+      <div class="lag" id="lagBox" hidden><span id="lagTxt">30 s</span><small id="lagSub">bagud</small></div>
+      <div class="toast" id="toast" hidden></div>
+      <div class="zonehelp" id="zoneHelp" hidden>
+        <span>Træk et felt hen over luften over trampetten, hvor gymnasterne er i luften.</span>
+        <button class="acc" id="zoneDone">Færdig</button>
+      </div>
+      <div class="startbox" id="startBox">
+        <div class="card">
+          <h1>Klar til træning</h1>
+          <p>Sæt iPad'en på stativet med kameraet mod landingen. Start kameraet, og vælg hvor mange sekunder billedet skal være forsinket.</p>
+          <button class="acc" id="startCam">Start kamera</button>
+          <p id="camErr" class="err"></p>
+          <p class="muted" style="font-size:14px">Billeder og klip bliver kun gemt på denne enhed.</p>
+        </div>
+      </div>
+    </div>
+    <div class="bar">
+      <div class="grp">
+        <label for="delayIn">Forsinkelse</label>
+        <button id="dMinus" aria-label="Et sekund mindre">−</button>
+        <input id="delayIn" type="number" min="0" max="90" inputmode="numeric" value="30">
+        <button id="dPlus" aria-label="Et sekund mere">+</button>
+      </div>
+      <div class="grp">
+        <button id="back5">⟲ 5 s</button>
+        <button id="pause">Pause</button>
+        <button id="fwd5">5 s ⟳</button>
+        <button id="toDelay" class="ghost">Tilbage til forsinkelse</button>
+      </div>
+      <div class="grow"></div>
+      <div class="grp">
+        <label>Bevægelse</label><div class="meter"><i id="meter"></i></div>
+        <button id="zoneBtn" class="ghost">Indstil luftfelt</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- KLIP (træner) -->
+  <section class="view" id="clips" hidden>
+    <div class="wrap" id="clipsWrap"></div>
+  </section>
+
+  <!-- MINE SPRING (gymnast) -->
+  <section class="view" id="mine" hidden>
+    <div class="wrap" id="mineWrap"></div>
+  </section>
+
+  <!-- OPSÆTNING -->
+  <section class="view" id="setup" hidden>
+    <div class="wrap" id="setupWrap"></div>
+  </section>
+</main>
+
+<div class="modal" id="player" hidden>
+  <div class="top"><b id="plTitle">Spring</b><button id="plClose">Luk</button></div>
+  <div style="min-height:0;position:relative"><video id="plVideo" playsinline controls muted></video><canvas id="plCanvas" hidden></canvas></div>
+  <div class="ctl">
+    <button id="plSlow">Slowmotion</button>
+    <button id="plReplay">Afspil igen</button>
+    <a id="plSave" download hidden><button>Gem video</button></a>
+  </div>
+</div>
+
+<video id="cam" playsinline muted autoplay style="position:fixed;width:2px;height:2px;opacity:.01;left:0;top:0;pointer-events:none"></video>
+<script src="app.js"></script>
+</body>
+</html>
