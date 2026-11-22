@@ -989,7 +989,7 @@ async function cloudCheck() {
   } catch {}
   if (view === 'setup' && trainerOk) renderCloud();
   if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
-  if (cloudTrainer) { if (S.rosterLinked) cloudRoster(S.roster); cloudRetry(); cloudPrune(); if (trainerOk && !S.rosterLinked) rosterLink(false); }
+  if (cloudTrainer) { cloudRetry(); cloudPrune(); if (trainerOk) rosterLink(false); }
 }
 const codeHash = async (n, code) => {
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`springklip:${n}:${code}`));
@@ -1018,25 +1018,34 @@ async function decCode(enc, pin) {
   return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
 }
 // Kobler denne enheds gymnastliste til skyen. En ny enhed henter koderne i stedet for at overskrive dem.
+// Skyen er stedet, hvor pigernes koder "bor". Hver gang en træner låser op, hentes listen fra skyen,
+// så alle enheder (iPad, computer, telefon) viser de samme koder. Enheden sender kun sine egne ændringer op.
 async function rosterLink(newPin) {
   if (!cloudTrainer || !trainerPin) return;
-  if (S.rosterLinked) { if (newPin) await cloudRoster(S.roster); return; }
+  // skift af trænerkode på en enhed, der allerede er koblet: krypter alle koder igen med den nye kode
+  if (newPin && S.rosterLinked) { await cloudRoster(S.roster, true); return; }
   const { data, error } = await sb.from('gymnasts').select('n, name, code_enc').order('n');
   if (error) return;
   const withEnc = (data || []).filter((r) => r.code_enc);
-  if (!withEnc.length) { S.rosterLinked = true; save(); await cloudRoster(S.roster); return; } // skyen er tom (eller har kun gamle rækker fra denne enhed)
+  if (!withEnc.length) { S.rosterLinked = true; save(); await cloudRoster(S.roster, true); return; } // skyen er tom: denne enhed bestemmer
   try {
-    const restored = [];
-    for (const r of data) restored.push({ n: r.n, name: r.name || '', code: r.code_enc ? await decCode(r.code_enc, trainerPin) : newCode() });
-    S.roster = restored; S.rosterLinked = true; save();
-    toast(`Hentede ${withEnc.length} gymnaster og deres koder fra skyen`);
+    const byN = new Map(S.roster.map((g) => [g.n, g]));
+    for (const r of data) {
+      const code = r.code_enc ? await decCode(r.code_enc, trainerPin) : (byN.get(r.n)?.code || newCode());
+      byN.set(r.n, { n: r.n, name: r.name || '', code });
+    }
+    S.roster = [...byN.values()].sort((x, y) => x.n - y.n);
+    S.rosterLinked = true; save();
+    await cloudRoster(S.roster, true); // sikrer at fingeraftryk og krypterede koder passer sammen
     if (view === 'setup') renderSetup();
   } catch {
-    toast('Koderne i skyen er låst med en anden trænerkode. Brug samme trænerkode som på den gamle iPad.');
+    S.rosterLinked = false; save();
+    toast('Koderne i skyen er låst med en anden trænerkode. Brug samme trænerkode som på den anden enhed.');
   }
 }
-async function cloudRoster(list) {
-  if (!cloudTrainer || !S.rosterLinked) return;
+async function cloudRoster(list, force) {
+  if (!cloudTrainer || !S.rosterLinked || !trainerPin) return; // sendes kun op, når trænerkoden er kendt (så koderne kan krypteres)
+  if (!force && !trainerOk) return;
   const rows = await Promise.all(list.map(async (g) => {
     const r = { n: g.n, name: g.name, code_hash: await codeHash(g.n, g.code), updated_at: new Date().toISOString() };
     const e = await encCode(g.code); if (e) r.code_enc = e;
@@ -1139,6 +1148,25 @@ if (location.hash === '#mine') {
   document.body.classList.add('gymnast');
   show('mine');
 }
+
+// Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
+const APP_VERSION = '20261122234533';
+async function checkVersion() {
+  try {
+    const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const v = (await r.text()).trim();
+    if (v && v !== APP_VERSION && !$('updBar')) {
+      const b = document.createElement('button');
+      b.id = 'updBar'; b.className = 'acc';
+      b.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:30;box-shadow:0 4px 18px #0008';
+      b.textContent = 'Ny version af Springklip · tryk for at opdatere';
+      b.onclick = async () => { b.textContent = 'Opdaterer …'; try { await fetch('index.html', { cache: 'reload' }); await fetch('app.js?v=' + v, { cache: 'reload' }); } catch {} location.reload(); };
+      document.body.appendChild(b);
+    }
+  } catch {}
+}
+checkVersion(); setInterval(checkVersion, 5 * 60 * 1000);
 
 // til test
 window.__springklip = { springs: () => springs, listClips, S, log };
