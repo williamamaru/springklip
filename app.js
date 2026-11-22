@@ -722,6 +722,7 @@ function renderSetup() {
   const w = $('setupWrap');
   if (!trainerOk) return pinScreen(w, 'Opsætning', renderSetup);
   w.innerHTML = `<h2>Opsætning</h2>
+    <div class="sec" id="cloudSec"></div>
     <div class="sec"><h3>Gymnaster</h3>
       <p class="muted">Nummeret passer til skiltet. Giv hver gymnast sin personlige kode, så hun kan se sine egne spring under "Mine spring".</p>
       <table><thead><tr><th>Nr.</th><th>Navn</th><th>Kode</th><th></th></tr></thead><tbody>
@@ -731,7 +732,6 @@ function renderSetup() {
       <div class="row"><button id="addG">Tilføj nummer</button>
       <a href="skilte/Nummerskilte_1-30.pdf" target="_blank" rel="noopener"><button>Nummerskilte 1–30 (PDF)</button></a></div>
     </div>
-    <div class="sec" id="cloudSec"></div>
     <div class="sec"><h3>Springgenkendelse</h3>
       <label>Følsomhed: kræver at <b id="sensV">${S.sens}</b> % af luftfeltet bevæger sig
         <input id="sens" type="range" min="0.3" max="6" step="0.1" value="${S.sens}" style="width:100%"></label>
