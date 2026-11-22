@@ -9,9 +9,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 // ---------- Opsætning ----------
 const KEY = 'springklip.v1';
-const DEF = { delay: 30, zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 14, trainerHash: '', roster: [] };
+const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 14, trainerHash: '', roster: [] };
 let S;
 try { S = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { S = { ...DEF }; }
+if (!Array.isArray(S.delays) || S.delays.length < 4) S.delays = [S.delay ?? 30, 33, 36, 39];
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} };
 if (!S.roster.length) {
   for (let n = 1; n <= 30; n++) S.roster.push({ n, name: '', code: '' });
@@ -94,7 +95,7 @@ const tagC = document.createElement('canvas');
 const tagX = tagC.getContext('2d', { willReadFrequently: true });
 let ring = []; // {t, blob}
 let pending = 0, running = false, lastCap = 0, stream = null, wakeLock = null;
-const bufferSec = () => Math.max(S.delay + 25, 70);
+const bufferSec = () => Math.max(Math.max(...S.delays.slice(0, S.views)) + 25, 70);
 
 async function startCamera(file) {
   $('camErr').textContent = '';
@@ -106,7 +107,7 @@ async function startCamera(file) {
     } else {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+        video: { facingMode: S.facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
       });
       cam.src = '';
       cam.srcObject = stream;
@@ -119,8 +120,7 @@ async function startCamera(file) {
   ring = []; prevMot = null; resetSpringState();
   running = true;
   $('startBox').hidden = true;
-  $('lagBox').hidden = false;
-  lag = S.delay; paused = false;
+  resetLags();
   setRec();
   keepAwake();
   capLoop();
@@ -135,10 +135,12 @@ cam.addEventListener('ended', () => {
   springs.filter((s) => s.state === 'reading').forEach(finishSpring);
 });
 
+let capToken = 0;
 function capLoop() {
   if (!running) return;
+  const my = ++capToken;
   const step = () => {
-    if (!running) return;
+    if (!running || my !== capToken) return;
     const t = now();
     if (t - lastCap >= 1 / 31 && cam.readyState >= 2) {
       lastCap = t;
@@ -167,73 +169,148 @@ function onFrame(t) {
   maybeReadTags(t);
 }
 
-// ---------- Forsinket visning ----------
+// ---------- Forsinket visning (1, 2 eller 4 billeder, hver med sin forsinkelse) ----------
 const screen = $('screen');
 const sx = screen.getContext('2d');
-let lag = S.delay, paused = false, pausedAt = 0, decoding = false, shownIdx = -1, shownBmp = null, zoneEdit = null, zoneMode = false;
-function viewT() { return paused ? pausedAt : now() - lag; }
+const LET = ['A', 'B', 'C', 'D'];
+let lags = S.delays.slice(), paused = false, pausedAt = [0, 0, 0, 0], sel = 0, zoneEdit = null, zoneMode = false;
+const vs = [0, 1, 2, 3].map(() => ({ bmp: null, idx: -1, dec: false }));
+function resetLags() { lags = S.delays.slice(); paused = false; $('pause').textContent = 'Pause'; }
+function viewT(i) { return paused ? pausedAt[i] : now() - lags[i]; }
 function findFrame(t) {
   let lo = 0, hi = ring.length - 1, ans = -1;
   while (lo <= hi) { const m = (lo + hi) >> 1; if (ring[m].t <= t) { ans = m; lo = m + 1; } else hi = m - 1; }
   return ans;
 }
-function fitRect(cw, ch) {
+function fitRect(cw, ch, ox = 0, oy = 0) {
   const r = Math.min(cw / CAP_W, ch / CAP_H);
   const w = CAP_W * r, h = CAP_H * r;
-  return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
+  return { x: ox + (cw - w) / 2, y: oy + (ch - h) / 2, w, h };
+}
+function panes(cw, ch) {
+  const n = S.views, g = 4 * (devicePixelRatio || 1);
+  if (n === 1) return [{ x: 0, y: 0, w: cw, h: ch }];
+  if (n === 2) {
+    if (cw / ch > 1.2) return [{ x: 0, y: 0, w: cw / 2 - g / 2, h: ch }, { x: cw / 2 + g / 2, y: 0, w: cw / 2 - g / 2, h: ch }];
+    return [{ x: 0, y: 0, w: cw, h: ch / 2 - g / 2 }, { x: 0, y: ch / 2 + g / 2, w: cw, h: ch / 2 - g / 2 }];
+  }
+  const w = cw / 2 - g / 2, h = ch / 2 - g / 2;
+  return [{ x: 0, y: 0, w, h }, { x: cw / 2 + g / 2, y: 0, w, h }, { x: 0, y: ch / 2 + g / 2, w, h }, { x: cw / 2 + g / 2, y: ch / 2 + g / 2, w, h }];
+}
+function drawImg(img, R) {
+  if (S.flip) { sx.save(); sx.translate(R.x + R.w, R.y); sx.scale(-1, 1); sx.drawImage(img, 0, 0, R.w, R.h); sx.restore(); }
+  else sx.drawImage(img, R.x, R.y, R.w, R.h);
+}
+function label(x, y, text, sub, dpr, on) {
+  sx.save();
+  sx.font = `800 ${22 * dpr}px -apple-system,Arial,sans-serif`;
+  const w1 = sx.measureText(text).width;
+  sx.font = `500 ${13 * dpr}px -apple-system,Arial,sans-serif`;
+  const w2 = sub ? sx.measureText(sub).width + 8 * dpr : 0;
+  sx.fillStyle = on ? '#f29a1f' : '#000c';
+  const bw = w1 + w2 + 20 * dpr, bh = 36 * dpr;
+  sx.beginPath(); (sx.roundRect ? sx.roundRect(x, y, bw, bh, 8 * dpr) : sx.rect(x, y, bw, bh)); sx.fill();
+  sx.fillStyle = on ? '#1d1203' : '#fff';
+  sx.textBaseline = 'middle';
+  sx.font = `800 ${22 * dpr}px -apple-system,Arial,sans-serif`; sx.fillText(text, x + 10 * dpr, y + bh / 2);
+  if (sub) { sx.font = `500 ${13 * dpr}px -apple-system,Arial,sans-serif`; sx.fillStyle = on ? '#1d1203' : '#9aa7b4'; sx.fillText(sub, x + 18 * dpr + w1, y + bh / 2 + 1); }
+  sx.restore();
 }
 function drawLoop() {
   requestAnimationFrame(drawLoop);
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const cw = Math.round(screen.clientWidth * dpr), ch = Math.round(screen.clientHeight * dpr);
   if (!cw || !ch) return;
-  if (screen.width !== cw || screen.height !== ch) { screen.width = cw; screen.height = ch; shownIdx = -1; }
-  if (!running && !shownBmp) return;
-  const R = fitRect(cw, ch);
+  if (screen.width !== cw || screen.height !== ch) { screen.width = cw; screen.height = ch; }
+  if (!running && !vs[0].bmp) return;
+  sx.fillStyle = '#000'; sx.fillRect(0, 0, cw, ch);
   if (zoneMode) {
-    if (cam.readyState >= 2) { sx.fillStyle = '#000'; sx.fillRect(0, 0, cw, ch); sx.drawImage(cam, R.x, R.y, R.w, R.h); }
+    const R = fitRect(cw, ch);
+    if (cam.readyState >= 2) sx.drawImage(cam, R.x, R.y, R.w, R.h);
     drawZone(R, true);
+    label(12 * dpr, 12 * dpr, 'Live', 'luftfelt', dpr, false);
     return;
   }
-  const t = viewT();
-  const idx = findFrame(t);
-  if (idx >= 0 && idx !== shownIdx && !decoding) {
-    decoding = true;
-    const f = ring[idx];
-    createImageBitmap(f.blob).then((bmp) => {
-      if (shownBmp && shownBmp.close) shownBmp.close();
-      shownBmp = bmp; shownIdx = idx; decoding = false;
-    }).catch(() => { decoding = false; });
-  }
-  sx.fillStyle = '#000'; sx.fillRect(0, 0, cw, ch);
-  if (shownBmp) sx.drawImage(shownBmp, R.x, R.y, R.w, R.h);
-  else { sx.fillStyle = '#9aa7b4'; sx.font = `${18 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Samler billeder op …', cw / 2, ch / 2); }
-  // forsinkelse
-  const behind = Math.max(0, now() - t);
-  const have = ring.length ? now() - ring[0].t : 0;
-  $('lagTxt').textContent = paused ? 'Pause' : (behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
-  $('lagSub').textContent = paused ? `${Math.round(behind)} s bagud` : (have + 0.5 < behind ? `venter (${Math.round(have)} s optaget)` : 'bagud');
+  const P = panes(cw, ch), have = ring.length ? now() - ring[0].t : 0;
+  P.forEach((p, i) => {
+    const v = vs[i], t = viewT(i), idx = findFrame(t);
+    if (idx >= 0 && idx !== v.idx && !v.dec) {
+      v.dec = true;
+      const f = ring[idx];
+      createImageBitmap(f.blob).then((bmp) => { if (v.bmp && v.bmp.close) v.bmp.close(); v.bmp = bmp; v.idx = idx; v.dec = false; }).catch(() => { v.dec = false; });
+    }
+    const R = fitRect(p.w, p.h, p.x, p.y);
+    if (v.bmp) drawImg(v.bmp, R);
+    else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Samler billeder op …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
+    const behind = Math.max(0, now() - t);
+    const txt = (P.length > 1 ? LET[i] + '  ' : '') + (behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
+    const sub = paused ? 'pause' : (have + 0.5 < behind ? `venter · ${Math.round(have)} s optaget` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : ''));
+    label(R.x + 10 * dpr, R.y + 10 * dpr, txt, sub, dpr, P.length > 1 && i === sel);
+    if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
+  });
 }
 requestAnimationFrame(drawLoop);
 
-function setDelay(v) {
-  S.delay = Math.max(0, Math.min(90, Math.round(v)));
-  $('delayIn').value = S.delay;
-  lag = S.delay; paused = false; $('pause').textContent = 'Pause';
-  save();
+function syncDelayUI() {
+  $('delayIn').value = S.delays[sel];
+  $('delayLbl').textContent = S.views > 1 ? `Forsinkelse ${LET[sel]}` : 'Forsinkelse';
+  for (const b of $('layoutSeg').children) b.classList.toggle('on', +b.dataset.n === S.views);
 }
-$('dMinus').onclick = () => setDelay(S.delay - 1);
-$('dPlus').onclick = () => setDelay(S.delay + 1);
+function setDelay(v) {
+  S.delays[sel] = Math.max(0, Math.min(120, Math.round(v)));
+  lags[sel] = S.delays[sel];
+  if (paused) pausedAt[sel] = now() - lags[sel];
+  save(); syncDelayUI();
+}
+$('dMinus').onclick = () => setDelay(S.delays[sel] - 1);
+$('dPlus').onclick = () => setDelay(S.delays[sel] + 1);
 $('delayIn').onchange = (e) => setDelay(+e.target.value || 0);
-$('delayIn').value = S.delay;
-const maxLag = () => (ring.length ? now() - ring[0].t : 0);
-$('back5').onclick = () => { if (paused) pausedAt = Math.max(ring[0]?.t ?? pausedAt, pausedAt - 5); else lag = Math.min(maxLag(), lag + 5); };
-$('fwd5').onclick = () => { if (paused) pausedAt = Math.min(now(), pausedAt + 5); else lag = Math.max(0, lag - 5); };
-$('pause').onclick = () => {
-  if (paused) { lag = Math.max(0, now() - pausedAt); paused = false; $('pause').textContent = 'Pause'; }
-  else { pausedAt = viewT(); paused = true; $('pause').textContent = 'Afspil'; }
+$('layoutSeg').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.views = +b.dataset.n; if (sel >= S.views) sel = 0;
+  save(); resetLags(); syncDelayUI();
 };
-$('toDelay').onclick = () => setDelay(S.delay);
+syncDelayUI();
+const oldest = () => (ring.length ? ring[0].t : now());
+$('back5').onclick = () => {
+  for (let i = 0; i < 4; i++) { if (paused) pausedAt[i] = Math.max(oldest(), pausedAt[i] - 5); else lags[i] = Math.min(now() - oldest(), lags[i] + 5); }
+};
+$('fwd5').onclick = () => {
+  for (let i = 0; i < 4; i++) { if (paused) pausedAt[i] = Math.min(now(), pausedAt[i] + 5); else lags[i] = Math.max(0, lags[i] - 5); }
+};
+$('pause').onclick = () => {
+  if (paused) { for (let i = 0; i < 4; i++) lags[i] = Math.max(0, now() - pausedAt[i]); paused = false; $('pause').textContent = 'Pause'; }
+  else { for (let i = 0; i < 4; i++) pausedAt[i] = viewT(i); paused = true; $('pause').textContent = 'Afspil'; }
+};
+$('toDelay').onclick = () => resetLags();
+$('flipBtn').onclick = () => { S.flip = !S.flip; save(); $('flipBtn').classList.toggle('on', S.flip); };
+$('flipBtn').classList.toggle('on', S.flip);
+$('camSwitch').onclick = async () => {
+  S.facing = S.facing === 'environment' ? 'user' : 'environment'; save();
+  if (!running || !stream) return;
+  try {
+    const ns = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: S.facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
+    stream.getTracks().forEach((t) => t.stop());
+    stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null; capLoop();
+    toast(S.facing === 'user' ? 'Frontkamera' : 'Bagkamera');
+  } catch { toast('Kunne ikke skifte kamera'); }
+};
+// vælg billede ved tryk, og skjul knapperne når der ikke bliver rørt ved skærmen
+screen.addEventListener('pointerdown', (e) => {
+  if (zoneMode || S.views === 1) return;
+  const r = screen.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1);
+  const x = (e.clientX - r.left) * dpr, y = (e.clientY - r.top) * dpr;
+  const i = panes(screen.width, screen.height).findIndex((p) => x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h);
+  if (i >= 0) { sel = i; syncDelayUI(); }
+});
+let calmT = null;
+function wake() {
+  document.body.classList.remove('calm');
+  clearTimeout(calmT);
+  calmT = setTimeout(() => { if (running && view === 'live' && !zoneMode && $('player').hidden) document.body.classList.add('calm'); }, 8000);
+}
+document.addEventListener('pointerdown', wake, true);
+wake();
 
 // ---------- Luftfelt ----------
 function drawZone(R, editing) {
@@ -253,7 +330,7 @@ $('zoneBtn').onclick = () => {
 $('zoneDone').onclick = () => {
   zoneMode = false; $('zoneHelp').hidden = true;
   if (zoneEdit) { S.zone = zoneEdit; save(); }
-  zoneEdit = null; prevMot = null; shownIdx = -1;
+  zoneEdit = null; prevMot = null;
   toast('Luftfeltet er gemt');
 };
 let dragFrom = null;
