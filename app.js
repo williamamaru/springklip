@@ -90,8 +90,18 @@ async function pruneOld() {
 
 // ---------- Kamera og ringbuffer ----------
 const cam = $('cam');
-const CAP_W = 960, CAP_H = 540;
+// Billederne gemmes i kameraets egne proportioner (liggende 16:9 på iPad, stående på en iPhone holdt lodret),
+// så intet bliver mast sammen. Længste side: 1280 px på iPad/computer, 960 px på telefon for at spare hukommelse.
+let CAP_W = 1280, CAP_H = 720;
+const CAP_LONG = Math.min(window.screen.width, window.screen.height) < 600 ? 960 : 1280;
 const capC = document.createElement('canvas'); capC.width = CAP_W; capC.height = CAP_H;
+function updCap() {
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if (!vw || !vh) return;
+  const sc = Math.min(1, CAP_LONG / Math.max(vw, vh));
+  const w = Math.round((vw * sc) / 2) * 2, h = Math.round((vh * sc) / 2) * 2;
+  if (w !== CAP_W || h !== CAP_H) { CAP_W = w; CAP_H = h; capC.width = w; capC.height = h; }
+}
 const capX = capC.getContext('2d');
 const MOT_W = 192, MOT_H = 108;
 const motC = document.createElement('canvas'); motC.width = MOT_W; motC.height = MOT_H;
@@ -160,6 +170,7 @@ function capLoop() {
 function onFrame(t) {
   // gem et komprimeret billede i ringbufferen
   if (pending < 3) {
+    updCap();
     capX.drawImage(cam, 0, 0, CAP_W, CAP_H);
     pending++;
     capC.toBlob((b) => {
@@ -169,7 +180,7 @@ function onFrame(t) {
       let i = 0;
       while (i < ring.length && ring[i].t < cut && !(lockFrom !== null && ring[i].t >= lockFrom)) i++;
       if (i) ring.splice(0, i);
-    }, 'image/jpeg', 0.72);
+    }, 'image/jpeg', 0.75);
   }
   motion(t);
   maybeReadTags(t);
@@ -188,9 +199,9 @@ function findFrame(t) {
   while (lo <= hi) { const m = (lo + hi) >> 1; if (ring[m].t <= t) { ans = m; lo = m + 1; } else hi = m - 1; }
   return ans;
 }
-function fitRect(cw, ch, ox = 0, oy = 0) {
-  const r = Math.min(cw / CAP_W, ch / CAP_H);
-  const w = CAP_W * r, h = CAP_H * r;
+function fitRect(cw, ch, ox = 0, oy = 0, iw = CAP_W, ih = CAP_H) {
+  const r = Math.min(cw / iw, ch / ih);
+  const w = iw * r, h = ih * r;
   return { x: ox + (cw - w) / 2, y: oy + (ch - h) / 2, w, h };
 }
 function panes(cw, ch) {
@@ -245,9 +256,10 @@ function drawLoop() {
       const f = ring[idx];
       createImageBitmap(f.blob).then((bmp) => { if (v.bmp && v.bmp.close) v.bmp.close(); v.bmp = bmp; v.idx = idx; v.dec = false; }).catch(() => { v.dec = false; });
     }
-    const R = fitRect(p.w, p.h, p.x, p.y);
     const behind = Math.max(0, now() - t);
     const filling = !paused && (idx < 0 || have + 0.5 < behind);
+    const src = filling ? null : v.bmp;
+    const R = fitRect(p.w, p.h, p.x, p.y, src ? src.width : CAP_W, src ? src.height : CAP_H);
     // mens forsinkelsen fyldes op, vises live-billedet, så man kan se at kameraet virker
     if (filling && cam.readyState >= 2) drawImg(cam, R);
     else if (v.bmp) drawImg(v.bmp, R);
@@ -598,7 +610,8 @@ async function makeClip(s, frames) {
   const mime = pickMime();
   if (mime && recC.captureStream) {
     const first = await createImageBitmap(frames[0].blob);
-    recX.drawImage(first, 0, 0, CAP_W, CAP_H); first.close && first.close();
+    recC.width = first.width; recC.height = first.height;
+    recX.drawImage(first, 0, 0, recC.width, recC.height); first.close && first.close();
     const st = recC.captureStream(30);
     const rec = new MediaRecorder(st, { mimeType: mime, videoBitsPerSecond: 1_500_000 });
     const parts = [];
@@ -610,7 +623,7 @@ async function makeClip(s, frames) {
       const bmp = await createImageBitmap(frames[i].blob);
       const due = (frames[i].t - frames[0].t) * 1000 - (performance.now() - t0);
       if (due > 0) await sleep(due);
-      recX.drawImage(bmp, 0, 0, CAP_W, CAP_H);
+      recX.drawImage(bmp, 0, 0, recC.width, recC.height);
       bmp.close && bmp.close();
     }
     await sleep(120);
@@ -627,7 +640,8 @@ async function makeClip(s, frames) {
 async function thumbOf(blob) {
   const bmp = await createImageBitmap(blob);
   const c = document.createElement('canvas'); c.width = 320; c.height = 180;
-  c.getContext('2d').drawImage(bmp, 0, 0, 320, 180);
+  const r = Math.max(320 / bmp.width, 180 / bmp.height), w = bmp.width * r, h = bmp.height * r;
+  c.getContext('2d').drawImage(bmp, (320 - w) / 2, (180 - h) / 2, w, h);
   bmp.close && bmp.close();
   return c.toDataURL('image/jpeg', 0.7);
 }
@@ -660,13 +674,13 @@ async function openClip(id) {
 async function playFrames(fr) {
   clearTimeout(plTimer);
   const x = plC.getContext('2d');
-  plC.width = CAP_W; plC.height = CAP_H;
+  const f0 = await createImageBitmap(fr[0].blob); plC.width = f0.width; plC.height = f0.height; f0.close && f0.close();
   let i = 0;
   const t0 = performance.now();
   const tick = async () => {
     if ($('player').hidden || i >= fr.length) return;
     const bmp = await createImageBitmap(fr[i].blob);
-    x.drawImage(bmp, 0, 0, CAP_W, CAP_H); bmp.close && bmp.close();
+    x.drawImage(bmp, 0, 0, plC.width, plC.height); bmp.close && bmp.close();
     i++;
     if (i < fr.length) {
       const due = (fr[i].t * 1000) / plRate - (performance.now() - t0);
