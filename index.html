@@ -115,6 +115,7 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
 #cmp{background:#000}
 .cmpbox{display:grid;grid-template-columns:1fr 1fr;gap:4px;min-height:0}.cmpbox.stack{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
 .cmpbox>div{position:relative;min-height:0;min-width:0}.cmpbox span{position:absolute;left:8px;top:8px;background:#000c;color:#fff;padding:4px 8px;border-radius:6px;font-weight:700;font-size:14px}
+#holdBtn.rec{background:#d63c2f;border-color:#d63c2f;color:#fff;font-weight:700}
 .clip.sel{outline:4px solid var(--acc);outline-offset:-2px}
 @media (max-width:640px){.lag{font-size:20px}.rec span.long{display:none}}
 </style>
@@ -164,6 +165,7 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
       </div>
       <div class="grp">
         <button id="clipBtn" aria-pressed="true">Klip: til</button>
+        <button id="holdBtn" aria-pressed="false">Holdomgang</button>
         <select id="presetSel" aria-label="Opstilling: hvilket redskab tæller som spring" style="width:auto;min-width:130px;font-weight:700"></select>
       </div>
       <div class="grp seg" id="layoutSeg" role="group" aria-label="Antal billeder">
@@ -240,6 +242,6 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
 
 <script src="lib/supabase.js?v=2.119.0"></script>
 <script src="lib/mp4-muxer.js?v=5.2.2"></script>
-<script src="app.js?v=20261123224427"></script>
+<script src="app.js?v=20261123225711"></script>
 </body>
 </html>

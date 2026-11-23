@@ -30,8 +30,10 @@ function newCode() {
   do { const r = crypto.getRandomValues(new Uint32Array(6)); c = [...r].map((x) => A[x % A.length]).join(''); } while (used.has(c));
   return c;
 }
+const TEAM = -1; // klip for hele holdet (holdomgang): alle gymnaster kan se dem
 const gName = (n) => {
   if (!n) return 'Ukendt';
+  if (n === TEAM) return 'Holdet';
   const g = S.roster.find((x) => x.n === n);
   return g && g.name ? `${n} · ${g.name}` : `Nr. ${n}`;
 };
@@ -153,6 +155,7 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) keepAwake(); });
 cam.addEventListener('ended', () => {
   running = false; setRec(); toast('Videoen er slut');
+  if (hold.on) holdStop();
   if (active) { const st = active.start; active = null; if (lastAbove - st >= 0.25) newSpring(st, lastAbove); }
   springs.filter((s) => s.state === 'reading').forEach(finishSpring);
 });
@@ -331,6 +334,13 @@ function drawLoop() {
   if (vs[0].cur && vs[0].cur !== perf.lastShown) { perf.lastShown = vs[0].cur; perf.shown++; }
   if (ENG !== 'h264') pruneDecoded(viewTs);
   if (S.showDet && running && cam.readyState >= 2) drawDet(cw, ch, dpr);
+  if (hold.on) { // tydeligt mærke, så man kan se at holdomgangen optages, også når knapperne er skjult
+    const sec = Math.floor((Date.now() - hold.t0) / 1000), txt = `● Holdomgang ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    sx.save(); sx.font = `800 ${18 * dpr}px -apple-system,Arial,sans-serif`;
+    const w = sx.measureText(txt).width + 20 * dpr, x = (cw - w) / 2, y = 12 * dpr;
+    sx.fillStyle = '#d63c2f'; sx.beginPath(); (sx.roundRect ? sx.roundRect(x, y, w, 34 * dpr, 8 * dpr) : sx.rect(x, y, w, 34 * dpr)); sx.fill();
+    sx.fillStyle = '#fff'; sx.textBaseline = 'middle'; sx.fillText(txt, x + 10 * dpr, y + 17 * dpr); sx.restore();
+  }
 }
 requestAnimationFrame(drawLoop);
 
@@ -968,6 +978,65 @@ $('plReplay').onclick = () => {
   if (plClip?.blob || plClip?.url) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
 };
 
+// ---------- Holdomgang ----------
+// Et langt klip fra man trykker, til man trykker igen (spring i strøm). Det gives til hele holdet, så alle gymnaster kan se det.
+// Optages direkte fra kameraet med enhedens videochip. Deles i stykker á 60 s, så hver fil kan sendes op (grænse 25 MB).
+const HOLD_PART = 60;
+const hold = { on: false, rec: null, id0: 0, t0: 0, no: 0, cut: 0, timer: 0, mime: '', thumb: '' };
+function camThumb() {
+  const c = document.createElement('canvas'); c.width = 320; c.height = 180;
+  const vw = cam.videoWidth || 16, vh = cam.videoHeight || 9, r = Math.max(320 / vw, 180 / vh);
+  try { c.getContext('2d').drawImage(cam, (320 - vw * r) / 2, (180 - vh * r) / 2, vw * r, vh * r); } catch {}
+  return c.toDataURL('image/jpeg', 0.7);
+}
+function holdStream() {
+  if (stream && stream.active) return stream;
+  try { return cam.captureStream ? cam.captureStream() : cam.mozCaptureStream ? cam.mozCaptureStream() : null; } catch { return null; }
+}
+function holdStart() {
+  const st = holdStream(), mime = pickMime();
+  if (!running || !st) { toast('Start kameraet først'); return; }
+  if (!mime) { toast('Holdomgang kan ikke optages i denne browser'); return; }
+  hold.on = true; hold.id0 = Date.now(); hold.t0 = Date.now(); hold.no = 0; hold.mime = mime; hold.thumb = camThumb();
+  holdPart(st);
+  clearInterval(hold.timer); hold.timer = setInterval(holdUI, 1000); holdUI();
+  toast('Holdomgang optages. Tryk igen for at stoppe.');
+}
+function holdPart(st) {
+  const no = ++hold.no, at = Date.now(), parts = [];
+  let rec;
+  try { rec = new MediaRecorder(st, { mimeType: hold.mime, videoBitsPerSecond: 2_500_000 }); }
+  catch (e) { hold.on = false; holdUI(); toast('Holdomgang kunne ikke startes'); return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
+  rec.onstop = () => holdSave(no, at, Date.now(), parts, no === 1 ? hold.thumb : camThumb());
+  rec.start(1000);
+  hold.rec = rec;
+  clearTimeout(hold.cut);
+  hold.cut = setTimeout(() => { if (hold.on && hold.rec === rec) { rec.stop(); holdPart(st); } }, HOLD_PART * 1000);
+}
+function holdStop() {
+  if (!hold.on) return;
+  hold.on = false; clearTimeout(hold.cut); clearInterval(hold.timer);
+  try { if (hold.rec && hold.rec.state !== 'inactive') hold.rec.stop(); } catch {}
+  hold.rec = null; holdUI();
+}
+async function holdSave(no, at, end, parts, thumb) {
+  const blob = new Blob(parts, { type: hold.mime.split(';')[0] });
+  if (blob.size < 1000) return;
+  const c = { id: `${hold.id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
+  await putClip(c); refreshLists(); setRec();
+  toast(no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
+  cloudUpload(c);
+}
+function holdUI() {
+  const b = $('holdBtn');
+  const sec = Math.floor((Date.now() - hold.t0) / 1000);
+  b.textContent = hold.on ? `■ Stop holdomgang ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : 'Holdomgang';
+  b.classList.toggle('rec', hold.on);
+  b.setAttribute('aria-pressed', hold.on);
+}
+$('holdBtn').onclick = () => (hold.on ? holdStop() : holdStart());
+
 // ---------- Sammenlign to klip ----------
 // To klip afspilles samtidig med fælles knapper. Det andet klip kan rykkes, så afsættet sker samtidig.
 let cmpPick = null; // null = ikke i gang, ellers de valgte klip
@@ -1150,7 +1219,7 @@ async function renderClips() {
   const list = await allClips();
   const onlyUnk = w.dataset.unk === '1';
   const shown = onlyUnk ? list.filter((c) => !c.g) : list;
-  const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
+  const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${sel === TEAM ? ' selected' : ''}>Holdet (alle kan se)</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
       <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
@@ -1265,7 +1334,7 @@ async function renderMine() {
     };
     return;
   }
-  const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at) })) : await listClips(mineG);
+  const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at) })) : (await listClips()).filter((c) => c.g === mineG || c.g === TEAM);
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
@@ -1277,7 +1346,7 @@ async function renderMine() {
     const c0 = list[+b.dataset.i];
     if (cmpPick && cmpPick.some((x) => x.id === c0.id)) b.closest('.clip').classList.add('sel');
     b.onclick = async () => {
-      const c = c0.url ? { ...c0, g: mineG } : await getClip(c0.id);
+      const c = c0.url ? { ...c0, g: c0.g ?? mineG } : await getClip(c0.id);
       if (!c) return;
       if (cmpPick) { clearTimeout(idleT); return pickForCompare(c, b, renderMine); }
       openClip(c.url ? c : c.id);
@@ -1517,7 +1586,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123224427';
+const APP_VERSION = '20261123225711';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
@@ -1704,5 +1773,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { springs: () => springs, getClip, openCompare, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
