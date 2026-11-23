@@ -132,6 +132,12 @@ async function startCamera(file) {
     $('camErr').textContent = file ? 'Videoen kunne ikke afspilles.' : 'Kameraet kunne ikke startes. Tjek at siden må bruge kameraet (Indstillinger → Safari → Kamera).';
     return;
   }
+  for (let i = 0; i < 4; i++) hpDrop(i);
+  ENG = 'jpeg';
+  if (S.engine === 'h264') {
+    if (await h264Probe()) ENG = 'h264';
+    else toast('Den nye motor understøttes ikke på denne enhed. Bruger standardmotoren.');
+  }
   ring = []; prevMot = null; resetSpringState();
   running = true;
   $('startBox').hidden = true;
@@ -177,18 +183,20 @@ if (encW) encW.onmessage = (e) => {
   if (e.data.blob) addFrame(e.data.t, e.data.blob);
   else if (e.data.err) { encW = null; } // baggrundstråden kan ikke: brug den gamle metode
 };
-function addFrame(t, blob) {
-  const f = { t, blob };
+function addFrame(t, blob, extra) {
+  const f = extra ? { t, blob, ...extra } : { t, blob };
   if (!ring.length || ring[ring.length - 1].t <= t) ring.push(f);
   else { let i = ring.length - 1; while (i > 0 && ring[i - 1].t > t) i--; ring.splice(i, 0, f); }
   const cut = now() - bufferSec();
   let i = 0;
   while (i < ring.length && ring[i].t < cut && !(lockFrom !== null && ring[i].t >= lockFrom)) i++;
+  if (f.data) while (i > 0 && i < ring.length && !ring[i].key) i--; // H.264: bufferen skal altid starte med et nøglebillede
   if (i) { for (const old of ring.splice(0, i)) dropDecoded(old); }
 }
 function onFrame(t) {
   updCap();
-  if (encW) {
+  if (ENG === 'h264') h264Encode(t);
+  else if (encW) {
     if (encPending < 4) {
       encPending++;
       const w = CAP_W, h = CAP_H, ww = encW;
@@ -221,7 +229,7 @@ setInterval(() => {
   if (el) el.textContent = perfText();
 }, 2000);
 function perfText() {
-  return `Gemmer ${perf.fpsCap.toFixed(0)} billeder/sek. · viste ${perf.fpsShown.toFixed(0)} billeder/sek. under Live · komprimering: ${encW ? 'i baggrunden' : 'på hovedtråden (langsommere)'} · tidsstempler: ${cam.requestVideoFrameCallback ? 'fra kameraet' : 'fra skærmen'} · billedstørrelse ${CAP_W}×${CAP_H}`;
+  return `Motor: ${ENG === 'h264' ? 'ny (H.264)' : 'standard (JPEG)'} · gemmer ${perf.fpsCap.toFixed(0)} billeder/sek. · viste ${perf.fpsShown.toFixed(0)} billeder/sek. under Live · komprimering: ${ENG === 'h264' ? 'videochippen' : encW ? 'i baggrunden' : 'på hovedtråden (langsommere)'} · tidsstempler: ${cam.requestVideoFrameCallback ? 'fra kameraet' : 'fra skærmen'} · billedstørrelse ${CAP_W}×${CAP_H}`;
 }
 function ensureDecoded(f) {
   if (!f || f.bmp || f.dec) return;
@@ -300,15 +308,16 @@ function drawLoop() {
   P.forEach((p, i) => {
     const v = vs[i], t = viewT(i), idx = findFrame(t);
     viewTs.push(t);
-    if (idx >= 0) {
+    const behind = Math.max(0, now() - t);
+    const filling = !paused && (idx < 0 || have + 0.5 < behind);
+    if (ENG === 'h264') { if (!filling) v.cur = h264Frame(i, t); }
+    else if (idx >= 0) {
       for (let k = idx; k < Math.min(ring.length, idx + 4); k++) ensureDecoded(ring[k]);
       if (ring[idx].bmp) { v.cur = ring[idx]; v.idx = idx; }
     }
-    const behind = Math.max(0, now() - t);
-    const filling = !paused && (idx < 0 || have + 0.5 < behind);
-    const vb = v.cur && v.cur.bmp;
+    const vb = ENG === 'h264' ? v.cur : v.cur && v.cur.bmp;
     const src = filling ? null : vb;
-    const R = fitRect(p.w, p.h, p.x, p.y, src ? src.width : CAP_W, src ? src.height : CAP_H);
+    const R = fitRect(p.w, p.h, p.x, p.y, src ? src.displayWidth || src.width : CAP_W, src ? src.displayHeight || src.height : CAP_H);
     // mens forsinkelsen fyldes op, vises live-billedet, så man kan se at kameraet virker
     if (filling && cam.readyState >= 2) drawImg(cam, R);
     else if (vb) drawImg(vb, R);
@@ -318,9 +327,9 @@ function drawLoop() {
     label(R.x + 10 * dpr, R.y + 10 * dpr, txt, S.clipOn === false && i === 0 && !paused ? (sub ? sub + ' · klip fra' : 'klip fra') : sub, dpr, P.length > 1 && i === sel);
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });
-  for (let i = P.length; i < 4; i++) vs[i].cur = null;
+  for (let i = P.length; i < 4; i++) { if (ENG === 'h264' && HP[i].dec) hpDrop(i); vs[i].cur = null; }
   if (vs[0].cur && vs[0].cur !== perf.lastShown) { perf.lastShown = vs[0].cur; perf.shown++; }
-  pruneDecoded(viewTs);
+  if (ENG !== 'h264') pruneDecoded(viewTs);
 }
 requestAnimationFrame(drawLoop);
 
@@ -541,14 +550,17 @@ function motion(t) {
   for (let k = 0; k < g.length; k++) if (Math.abs(g[k] - prevMot[k]) > 26) { diff[k] = 1; allCh++; }
   prevMot = g;
   // højeste andel bevægelse i et af felterne (hvert felt måles for sig, så et lille felt ikke drukner)
-  let frac = 0;
+  let frac = 0, inCh = 0, inN = 0;
   for (const z of preset().zones) {
     const x0 = Math.floor(z.x0 * MOT_W), x1 = Math.ceil(z.x1 * MOT_W), y0 = Math.floor(z.y0 * MOT_H), y1 = Math.ceil(z.y1 * MOT_H);
     let ch = 0, n = 0;
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; ch += diff[y * MOT_W + x]; }
     if (n) frac = Math.max(frac, (ch / n) * 100);
+    inCh += ch; inN += n;
   }
   const global = (allCh / g.length) * 100;
+  // bevægelse uden for luftfelterne: en person tæt på kameraet (går forbi, bærer en måtte) fylder meget af billedet
+  const outside = g.length - inN > 0 ? (Math.max(0, allCh - inCh) / (g.length - inN)) * 100 : 0;
   const th = S.sens;
   const m = $('meter');
   m.style.width = Math.min(100, (frac / (th * 3)) * 100) + '%';
@@ -558,18 +570,26 @@ function motion(t) {
   const above = frac > th;
   if (!active) {
     motAbove = above ? motAbove + 1 : 0;
-    if (motAbove >= 2) { active = { start: t - 0.1 }; lastAbove = t; }
+    if (motAbove >= 2) { active = { start: t - 0.1, fg: 0 }; lastAbove = t; }
   } else {
     if (above) lastAbove = t;
+    if (outside > FG_LIMIT) active.fg++;
     if (t - active.start > 8) { active = null; motAbove = 0; return; } // nogen står i feltet
     if (t - lastAbove > 0.7) {
       const dur = lastAbove - active.start;
-      if (dur >= 0.25 && dur <= 6) newSpring(active.start, lastAbove);
+      if (dur >= 0.25 && dur <= 6 && active.fg < 3) newSpring(active.start, lastAbove);
       active = null; motAbove = 0;
     }
   }
 }
+const FG_LIMIT = 12; // % af billedet uden for felterne, der bevæger sig samtidig
 function newSpring(start, end) {
+  // Starter der ny bevægelse kort efter den forrige, er det samme spring (fx træneren før afsættet): forlæng det i stedet for at lave et klip mere
+  const last = springs[springs.length - 1];
+  if (last && last.state === 'reading' && start - last.end < 2 && end - last.start <= 10) {
+    last.end = Math.max(last.end, end);
+    return;
+  }
   springNo++;
   const s = { id: `${Date.now()}-${springNo}`, d: preset().name, start, end, vt: Math.round((cam.currentTime - (now() - start)) * 10) / 10, votes: {}, state: 'reading', wall: Date.now() - (now() - start) * 1000 };
   springs.push(s);
@@ -665,8 +685,13 @@ async function runClips() {
     const wait = s.end + 2.0 - now();
     if (wait > 0) await sleep(wait * 1000);
     const a = s.start - 1.5, b = s.end + 2.0;
-    const frames = ring.filter((f) => f.t >= a && f.t <= b);
-    try { if (frames.length > 5) await makeClip(s, frames); } catch (e) { console.warn('klip fejlede', e); }
+    try {
+      if (ring.length && ring[0].data) await makeClip264(s, a, b);
+      else {
+        const frames = ring.filter((f) => f.t >= a && f.t <= b && f.blob);
+        if (frames.length > 5) await makeClip(s, frames);
+      }
+    } catch (e) { console.warn('klip fejlede', e); }
     s.state = 'done';
     const open = springs.filter((x) => x.state !== 'done');
     lockFrom = open.length ? Math.min(...open.map((x) => x.start - 1.5)) : null;
@@ -1024,6 +1049,9 @@ function renderSetup() {
     <div class="sec"><h3>Ydelse på denne enhed</h3>
       <p class="muted" id="perfTxt">${running ? perfText() : 'Start kameraet under Live for at se tallene.'}</p>
       <p class="muted" style="font-size:13px">Ved 30 billeder/sek. kører det helt glat. Står der "på hovedtråden", mangler browseren en funktion, og det kan hakke mere.</p>
+      <label>Motor</label>
+      <div class="grp seg" id="engSeg" role="group" aria-label="Motor"><button data-e="jpeg">Standard</button><button data-e="h264">Ny (H.264, prøve)</button></div>
+      <p class="muted" style="font-size:13px">Den nye motor lader iPad'ens videochip komprimere og afspille billederne. Det burde hakke mindre og bruge mindre hukommelse. Siden genindlæses, når du skifter, og kameraet skal startes igen.</p>
     </div>
     <div class="sec"><h3>Springgenkendelse</h3>
       <label>Følsomhed: kræver at <b id="sensV">${S.sens}</b> % af luftfeltet bevæger sig
@@ -1059,6 +1087,13 @@ function renderSetup() {
     const g = S.roster.find((x) => x.n === +b.dataset.show);
     b.textContent = b.textContent.startsWith('•') ? g.code : '••••••';
   }));
+  for (const b of $('engSeg').children) b.classList.toggle('on', b.dataset.e === (S.engine || 'jpeg'));
+  $('engSeg').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b || b.dataset.e === (S.engine || 'jpeg')) return;
+    S.engine = b.dataset.e; save();
+    toast(S.engine === 'h264' ? 'Skifter til den nye motor …' : 'Skifter til standardmotoren …');
+    setTimeout(() => location.reload(), 600);
+  };
   $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = S.sens; save(); };
   $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
   $('wipe').onclick = async (e) => {
@@ -1227,7 +1262,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123004651';
+const APP_VERSION = '20261123221651';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
@@ -1245,6 +1280,174 @@ async function checkVersion() {
 }
 checkVersion(); setInterval(checkVersion, 5 * 60 * 1000);
 
+// Ny motor (tilvalg under Opsætning): billederne gemmes som H.264-video i stedet for enkelte JPEG-billeder.
+// Komprimering og afkodning klares af enhedens videochip (WebCodecs), så hovedtråden har mindre at lave,
+// og bufferen fylder ca. 1/4. Klip laves direkte af de gemte videostykker uden at blive optaget igen.
+let ENG = 'jpeg'; // den motor, der kører lige nu
+const H = { codec: '', enc: null, cfg: null, w: 0, h: 0, n: 0, seq: 0, dropped: 0 };
+const H_BITRATE = 3_500_000, H_GOP = 30; // nøglebillede hvert sekund, så spoling og klip kan starte tæt på det ønskede sted
+const HP = [0, 1, 2, 3].map(() => ({ dec: null, next: -1, cfg: null, q: [], cur: null, seekTs: -1 }));
+
+function h264Possible() { return 'VideoEncoder' in window && 'VideoDecoder' in window && 'VideoFrame' in window && 'EncodedVideoChunk' in window; }
+async function h264Probe() {
+  if (!h264Possible()) return false;
+  for (const codec of ['avc1.4d0028', 'avc1.42e028', 'avc1.640028', 'avc1.42001f']) {
+    try {
+      const e = await VideoEncoder.isConfigSupported({ codec, width: 1280, height: 720, bitrate: H_BITRATE, framerate: 30, latencyMode: 'realtime', avc: { format: 'avc' } });
+      const d = await VideoDecoder.isConfigSupported({ codec, codedWidth: 1280, codedHeight: 720 });
+      if (e.supported && d.supported) { H.codec = codec; return true; }
+    } catch {}
+  }
+  return false;
+}
+function h264Config() {
+  try { if (H.enc && H.enc.state !== 'closed') H.enc.close(); } catch {}
+  H.cfg = null; H.n = 0;
+  H.enc = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (meta && meta.decoderConfig) H.cfg = { ...meta.decoderConfig, codedWidth: meta.decoderConfig.codedWidth || H.w, codedHeight: meta.decoderConfig.codedHeight || H.h };
+      if (!H.cfg) return;
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      addFrame(chunk.timestamp / 1e6, null, { key: chunk.type === 'key', data, cfg: H.cfg, seq: H.seq++ });
+    },
+    error: (e) => h264Fail('Videochippen gav en fejl: ' + (e && e.message ? e.message : e)),
+  });
+  H.w = CAP_W; H.h = CAP_H;
+  H.enc.configure({ codec: H.codec, width: H.w, height: H.h, bitrate: H_BITRATE, framerate: 30, latencyMode: 'realtime', avc: { format: 'avc' } });
+}
+function h264Encode(t) {
+  if (!H.enc || H.enc.state === 'closed' || H.w !== CAP_W || H.h !== CAP_H) h264Config();
+  if (H.enc.encodeQueueSize > 3) { H.dropped++; return; } // chippen er bagud: spring et billede over i stedet for at hobe op
+  capX.drawImage(cam, 0, 0, CAP_W, CAP_H);
+  let vf = null;
+  try {
+    vf = new VideoFrame(capC, { timestamp: Math.round(t * 1e6) });
+    H.enc.encode(vf, { keyFrame: H.n++ % H_GOP === 0 });
+  } catch (e) { h264Fail('Kunne ikke komprimere: ' + e.message); }
+  finally { if (vf) vf.close(); }
+}
+function h264Fail(msg) {
+  if (ENG !== 'h264') return;
+  console.warn(msg);
+  ENG = 'jpeg';
+  try { H.enc && H.enc.close(); } catch {}
+  H.enc = null;
+  for (let i = 0; i < 4; i++) hpDrop(i);
+  ring = []; lockFrom = null;
+  toast('Den nye motor virker ikke på denne enhed. Skifter til standardmotoren.');
+}
+
+// ---------- Afspilning: én afkoder pr. billede (A-D) ----------
+function hpDrop(i) {
+  const p = HP[i];
+  try { if (p.dec && p.dec.state !== 'closed') p.dec.close(); } catch {}
+  p.dec = null; p.next = -1; p.cfg = null; p.seekTs = -1;
+  for (const f of p.q) f.close();
+  p.q = [];
+  if (p.cur) { p.cur.close(); p.cur = null; }
+  if (vs[i]) vs[i].cur = null;
+}
+function hpSeek(p, k) {
+  const f = ring[k];
+  try {
+    if (!p.dec || p.dec.state === 'closed') {
+      p.dec = new VideoDecoder({
+        output: (fr) => { p.q.push(fr); while (p.q.length > 12) p.q.shift().close(); },
+        error: (e) => { console.warn('afkoder', e); p.dec = null; p.next = -1; },
+      });
+      p.cfg = null;
+    } else p.dec.reset();
+    if (p.cfg !== f.cfg) { p.dec.configure(f.cfg); p.cfg = f.cfg; } else p.dec.configure(f.cfg);
+  } catch (e) { console.warn(e); p.dec = null; p.next = -1; return; }
+  for (const fr of p.q) fr.close();
+  p.q = [];
+  p.next = f.seq;
+}
+// Det billede, der skal vises i billede i ved tiden t (eller det seneste, hvis det rigtige ikke er klar endnu)
+function h264Frame(i, t) {
+  const p = HP[i];
+  if (!ring.length || !ring[0].data) return p.cur;
+  const idx = findFrame(t);
+  if (idx < 0) return p.cur;
+  const base = ring[0].seq, tgt = ring[idx].seq, tUs = Math.round(ring[idx].t * 1e6);
+  const curTs = p.cur ? p.cur.timestamp : -1;
+  const broken = !p.dec || p.dec.state === 'closed' || p.next < base || p.next - base > ring.length;
+  const ahead = tgt >= p.next + 45; // langt foran: hop i stedet for at afkode alt imellem
+  const behind = p.next >= 0 && tgt < p.next - 8 && tUs < curTs - 1000; // spolet tilbage
+  if (broken || ahead || behind) {
+    // mens en tilbagespoling stadig afkodes, ventes der, så hurtig træk ikke starter forfra hele tiden
+    if (!broken && p.seekTs >= 0 && p.dec.decodeQueueSize > 0) return p.cur;
+    let k = idx;
+    while (k > 0 && !ring[k].key) k--;
+    if (!ring[k].key) return p.cur;
+    hpSeek(p, k);
+    p.seekTs = tUs;
+    if (!p.dec) return p.cur;
+  }
+  // fød afkoderen et par billeder foran det, der skal vises
+  while (p.next <= tgt + 4 && p.next - base < ring.length && p.dec.decodeQueueSize < 10) {
+    const f = ring[p.next - base];
+    try { p.dec.decode(new EncodedVideoChunk({ type: f.key ? 'key' : 'delta', timestamp: Math.round(f.t * 1e6), data: f.data })); }
+    catch (e) { console.warn(e); p.next = -1; return p.cur; }
+    p.next++;
+  }
+  // vælg det nyeste afkodede billede, der ikke ligger efter t
+  let pick = -1;
+  for (let k = 0; k < p.q.length; k++) if (p.q[k].timestamp <= tUs + 2000) pick = k;
+  if (pick >= 0) {
+    const fr = p.q[pick];
+    for (let k = 0; k < pick; k++) p.q[k].close();
+    p.q.splice(0, pick + 1);
+    if (p.seekTs >= 0 && fr.timestamp < p.seekTs - 2000) fr.close(); // mellembilleder efter et hop vises ikke
+    else { if (p.cur) p.cur.close(); p.cur = fr; p.seekTs = -1; }
+  }
+  return p.cur;
+}
+
+// ---------- Klip: videostykkerne lægges direkte i en mp4-fil ----------
+async function makeClip264(s, a, b) {
+  let i0 = ring.findIndex((f) => f.t >= a);
+  if (i0 < 0) return false;
+  while (i0 > 0 && !ring[i0].key) i0--;
+  while (i0 < ring.length && !ring[i0].key) i0++;
+  const i1 = findFrame(b);
+  if (i0 >= ring.length || i1 - i0 < 5) return false;
+  const ch = ring.slice(i0, i1 + 1).filter((f) => f.cfg === ring[i0].cfg); // samme opsætning hele vejen
+  const cfg = ch[0].cfg, t0 = ch[0].t;
+  const mux = new Mp4Muxer.Muxer({ target: new Mp4Muxer.ArrayBufferTarget(), video: { codec: 'avc', width: cfg.codedWidth, height: cfg.codedHeight }, fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
+  ch.forEach((f, k) => {
+    const ts = Math.round((f.t - t0) * 1e6);
+    const nx = ch[k + 1] ? Math.round((ch[k + 1].t - t0) * 1e6) : ts + 33333;
+    mux.addVideoChunkRaw(f.data, f.key ? 'key' : 'delta', ts, Math.max(1, nx - ts), k === 0 ? { decoderConfig: cfg } : undefined);
+  });
+  mux.finalize();
+  const blob = new Blob([mux.target.buffer], { type: 'video/mp4' });
+  const mid = ch.findIndex((f) => f.t >= (s.start + s.end) / 2);
+  const thumb = await thumb264(ch, mid < 0 ? ch.length >> 1 : mid);
+  const dur = ch[ch.length - 1].t - t0;
+  const c = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, dur: Math.round(dur * 10) / 10, thumb, blob, mime: 'video/mp4' };
+  await putClip(c); refreshLists(); cloudUpload(c);
+  return true;
+}
+async function thumb264(ch, upto) {
+  let last = null;
+  const dec = new VideoDecoder({ output: (fr) => { if (last) last.close(); last = fr; }, error: () => {} });
+  try {
+    dec.configure(ch[0].cfg);
+    for (let k = 0; k <= upto; k++) dec.decode(new EncodedVideoChunk({ type: ch[k].key ? 'key' : 'delta', timestamp: Math.round(ch[k].t * 1e6), data: ch[k].data }));
+    await dec.flush();
+  } catch {}
+  try { dec.close(); } catch {}
+  const c = document.createElement('canvas'); c.width = 320; c.height = 180;
+  if (last) {
+    const iw = last.displayWidth, ih = last.displayHeight, r = Math.max(320 / iw, 180 / ih);
+    c.getContext('2d').drawImage(last, (320 - iw * r) / 2, (180 - ih * r) / 2, iw * r, ih * r);
+    last.close();
+  }
+  return c.toDataURL('image/jpeg', 0.7);
+}
+
 // til test
-window.__springklip = { springs: () => springs, listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { springs: () => springs, getClip, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
