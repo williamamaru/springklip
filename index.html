@@ -112,6 +112,10 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
 .modal .top,.modal .ctl{display:flex;gap:8px;align-items:center;padding:10px 12px;flex-wrap:wrap}
 .modal .top b{font-size:18px;flex:1}
 .modal video,.modal canvas{width:100%;height:100%;object-fit:contain;background:#000}
+#cmp{background:#000}
+.cmpbox{display:grid;grid-template-columns:1fr 1fr;gap:4px;min-height:0}.cmpbox.stack{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+.cmpbox>div{position:relative;min-height:0;min-width:0}.cmpbox span{position:absolute;left:8px;top:8px;background:#000c;color:#fff;padding:4px 8px;border-radius:6px;font-weight:700;font-size:14px}
+.clip.sel{outline:4px solid var(--acc);outline-offset:-2px}
 @media (max-width:640px){.lag{font-size:20px}.rec span.long{display:none}}
 </style>
 </head>
@@ -215,8 +219,27 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
   </div>
 </div>
 
+<div class="modal" id="cmp" hidden>
+  <div class="top"><b>Sammenlign</b><button id="cmpLayout">Over/under</button><button id="cmpClose">Luk</button></div>
+  <div class="cmpbox" id="cmpBox">
+    <div><video id="cmpA" playsinline muted preload="auto"></video><span id="cmpAt"></span></div>
+    <div><video id="cmpB" playsinline muted preload="auto"></video><span id="cmpBt"></span></div>
+  </div>
+  <div class="ctl">
+    <button id="cmpPlay" class="acc">Afspil</button>
+    <button id="cmpSlow">Slowmotion</button>
+    <button id="cmpBack" aria-label="Et billede tilbage">◀ Billede</button>
+    <button id="cmpFwd" aria-label="Et billede frem">Billede ▶</button>
+    <input id="cmpScrub" type="range" min="0" max="1000" value="0" aria-label="Tidslinje" style="flex:1;min-width:180px">
+  </div>
+  <div class="ctl">
+    <span class="muted">Ryk det nederste/højre klip, så afsættet passer:</span>
+    <button id="cmpOffM">−0,1 s</button><b id="cmpOff" style="min-width:60px;text-align:center">0,0 s</b><button id="cmpOffP">+0,1 s</button>
+  </div>
+</div>
+
 <script src="lib/supabase.js?v=2.119.0"></script>
 <script src="lib/mp4-muxer.js?v=5.2.2"></script>
-<script src="app.js?v=20261123223721"></script>
+<script src="app.js?v=20261123224427"></script>
 </body>
 </html>

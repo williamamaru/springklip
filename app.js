@@ -611,7 +611,7 @@ function toNorm(e) {
 }
 
 // ---------- Springgenkendelse ----------
-let prevMot = null, motAbove = 0, active = null, lastAbove = 0;
+let prevMot = null, motAbove = 0, active = null, lastAbove = 0, camCalmUntil = 0;
 let springs = []; // {id,start,end,votes,state}
 let lockFrom = null; // ringbuffer må ikke slette billeder efter dette tidspunkt, før klip er lavet
 let springNo = 0;
@@ -637,6 +637,13 @@ function motion(t) {
     if (n) detSet(z, ch / n * 100 / S.sens);
     inCh += ch; inN += n;
   }
+  // baner tæller som "inde", så en der løber på banen ikke får et spring på trampetten smidt væk
+  for (const z of preset().zones) {
+    if (z.type !== 'lane') continue;
+    const L = laneMask(z);
+    for (let j = 0; j < L.idx.length; j++) inCh += diff[L.idx[j]];
+    inN += L.idx.length;
+  }
   const global = (allCh / g.length) * 100;
   // bevægelse uden for luftfelterne: en person tæt på kameraet (går forbi, bærer en måtte) fylder meget af billedet
   const outside = g.length - inN > 0 ? (Math.max(0, allCh - inCh) / (g.length - inN)) * 100 : 0;
@@ -644,7 +651,10 @@ function motion(t) {
   const m = $('meter');
   m.style.width = Math.min(100, (frac / (th * 3)) * 100) + '%';
   m.classList.toggle('hot', frac > th);
-  if (global > 45) return; // kameraet justerer lys/fokus
+  // hele billedet ændrer sig: iPad'en bliver flyttet, eller kameraet justerer lys/fokus. Hold pause i 3 s bagefter,
+  // så folk der står i felterne på det nye sted ikke bliver til spring
+  if (global > 45) camCalmUntil = t + 3;
+  if (t < camCalmUntil) { active = null; motAbove = 0; laneT = new WeakMap(); return; }
   if (S.clipOn === false) { active = null; motAbove = 0; laneT = new WeakMap(); return; } // klip slået fra, fx under teknik
   laneStep(t, diff);
   const above = frac > th;
@@ -958,6 +968,81 @@ $('plReplay').onclick = () => {
   if (plClip?.blob || plClip?.url) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
 };
 
+// ---------- Sammenlign to klip ----------
+// To klip afspilles samtidig med fælles knapper. Det andet klip kan rykkes, så afsættet sker samtidig.
+let cmpPick = null; // null = ikke i gang, ellers de valgte klip
+const cmp = { a: null, b: null, off: 0, rate: 1, urls: [], raf: 0, t0: 0, t1: 0 };
+const cA = $('cmpA'), cB = $('cmpB');
+function pickForCompare(c, btn, rerender) {
+  if (!c.blob && !c.url) { toast('Det klip kan ikke sammenlignes (det er gemt som enkeltbilleder).'); return; }
+  const i = cmpPick.findIndex((x) => x.id === c.id);
+  if (i >= 0) { cmpPick.splice(i, 1); btn.closest('.clip').classList.remove('sel'); return; }
+  cmpPick.push(c); btn.closest('.clip').classList.add('sel');
+  if (cmpPick.length === 2) { const [a, b] = cmpPick; cmpPick = null; rerender(); openCompare(a, b); }
+  else toast('Vælg ét klip mere');
+}
+function cmpSrc(c) { if (c.url) return c.url; const u = URL.createObjectURL(c.blob); cmp.urls.push(u); return u; }
+function cmpLabel(c) { return `${c.g ? gName(c.g) : 'Ukendt'} · ${fmtTime(c.at)}`; }
+async function openCompare(a, b) {
+  cmp.a = a; cmp.b = b; cmp.off = 0; cmp.rate = 1;
+  $('cmpAt').textContent = cmpLabel(a); $('cmpBt').textContent = cmpLabel(b);
+  $('cmpSlow').textContent = 'Slowmotion';
+  $('cmpBox').classList.toggle('stack', innerHeight > innerWidth);
+  cA.src = cmpSrc(a); cB.src = cmpSrc(b);
+  $('cmp').hidden = false;
+  await Promise.all([cA, cB].map((v) => (v.readyState >= 1 ? 0 : new Promise((r) => { v.onloadedmetadata = r; v.onerror = r; }))));
+  cmpRange(); cmpSeek(cmp.t0); cmpPlay(true);
+}
+function cmpDur(v, c) { return isFinite(v.duration) && v.duration > 0 ? v.duration : c.dur || 5; }
+// fælles tid t: A viser t, B viser t + off. Tidslinjen dækker kun det stykke, hvor begge har billeder.
+function cmpRange() {
+  const dA = cmpDur(cA, cmp.a), dB = cmpDur(cB, cmp.b);
+  cmp.t0 = Math.max(0, -cmp.off); cmp.t1 = Math.max(cmp.t0 + 0.1, Math.min(dA, dB - cmp.off));
+  $('cmpOff').textContent = `${cmp.off > 0 ? '+' : ''}${cmp.off.toFixed(1).replace('.', ',')} s`;
+}
+function cmpSeek(t) {
+  t = Math.max(cmp.t0, Math.min(cmp.t1, t));
+  cA.currentTime = t; cB.currentTime = t + cmp.off;
+  $('cmpScrub').value = Math.round(((t - cmp.t0) / (cmp.t1 - cmp.t0)) * 1000);
+}
+function cmpPlay(on) {
+  cancelAnimationFrame(cmp.raf);
+  if (!on) { cA.pause(); cB.pause(); $('cmpPlay').textContent = 'Afspil'; return; }
+  cA.playbackRate = cB.playbackRate = cmp.rate;
+  cA.play().catch(() => {}); cB.play().catch(() => {});
+  $('cmpPlay').textContent = 'Pause';
+  const tick = () => {
+    if ($('cmp').hidden) return;
+    const t = cA.currentTime;
+    if (t >= cmp.t1 - 0.02 || cA.ended) { cmpSeek(cmp.t0); } // forfra igen, så man kan se det mange gange
+    else {
+      if (Math.abs(cB.currentTime - (t + cmp.off)) > 0.06) cB.currentTime = t + cmp.off; // hold dem i takt
+      $('cmpScrub').value = Math.round(((t - cmp.t0) / (cmp.t1 - cmp.t0)) * 1000);
+    }
+    cmp.raf = requestAnimationFrame(tick);
+  };
+  cmp.raf = requestAnimationFrame(tick);
+}
+$('cmpPlay').onclick = () => cmpPlay(cA.paused);
+$('cmpSlow').onclick = () => {
+  cmp.rate = cmp.rate === 1 ? 0.4 : 1;
+  $('cmpSlow').textContent = cmp.rate === 1 ? 'Slowmotion' : 'Normal fart';
+  cA.playbackRate = cB.playbackRate = cmp.rate;
+};
+const cmpStep = (d) => { cmpPlay(false); cmpSeek(cA.currentTime + d); };
+$('cmpBack').onclick = () => cmpStep(-1 / 30);
+$('cmpFwd').onclick = () => cmpStep(1 / 30);
+$('cmpScrub').oninput = (e) => { cmpPlay(false); cmpSeek(cmp.t0 + (+e.target.value / 1000) * (cmp.t1 - cmp.t0)); };
+const cmpShift = (d) => { const t = cA.currentTime; cmp.off = Math.round((cmp.off + d) * 10) / 10; cmpRange(); cmpSeek(t); };
+$('cmpOffM').onclick = () => cmpShift(-0.1);
+$('cmpOffP').onclick = () => cmpShift(0.1);
+$('cmpLayout').onclick = () => $('cmpBox').classList.toggle('stack');
+$('cmpClose').onclick = () => {
+  cmpPlay(false); $('cmp').hidden = true;
+  cA.removeAttribute('src'); cB.removeAttribute('src'); cA.load(); cB.load();
+  cmp.urls.forEach((u) => URL.revokeObjectURL(u)); cmp.urls = [];
+};
+
 // ---------- Visninger ----------
 let view = 'live', trainerOk = false, mineG = null, idleT = null;
 $('tabs').onclick = (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.v); };
@@ -1069,6 +1154,7 @@ async function renderClips() {
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
       <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
+      <button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
     <p class="muted">${list.length} klip${cloudTrainer ? ` · ${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : ' på denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
     ${shown.length ? `<div class="grid">${shown.map((c) => `
@@ -1081,7 +1167,16 @@ async function renderClips() {
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
   if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
   $('lockBtn').onclick = () => { trainerOk = false; renderClips(); };
-  w.querySelectorAll('[data-play]').forEach((b) => (b.onclick = async () => { const c = await getAny(b.dataset.play); if (c) openClip(c); }));
+  $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; renderClips(); };
+  w.querySelectorAll('[data-play]').forEach((b) => {
+    if (cmpPick && cmpPick.some((x) => x.id === b.dataset.play)) b.closest('.clip').classList.add('sel');
+    b.onclick = async () => {
+      const c = await getAny(b.dataset.play);
+      if (!c) return;
+      if (cmpPick) return pickForCompare(c, b, renderClips);
+      openClip(c);
+    };
+  });
   w.querySelectorAll('[data-g]').forEach((s) => (s.onchange = async () => {
     await setClipG(s.dataset.g, +s.value); renderClips();
   }));
@@ -1172,15 +1267,22 @@ async function renderMine() {
   }
   const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at) })) : await listClips(mineG);
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
-  w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2><button class="acc" id="mineOut">Log ud</button></div>
+  w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
     ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" style="background-image:url('${c.thumb || ''}')" aria-label="Afspil"><span>${c.dur} s</span></button>
       <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
-  w.querySelectorAll('[data-i]').forEach((b) => (b.onclick = () => {
-    const c = list[+b.dataset.i];
-    openClip(c.url ? { ...c, g: mineG } : c.id);
-  }));
+  if ($('cmpBtn')) $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; clearTimeout(idleT); renderMine(); };
+  w.querySelectorAll('[data-i]').forEach((b) => {
+    const c0 = list[+b.dataset.i];
+    if (cmpPick && cmpPick.some((x) => x.id === c0.id)) b.closest('.clip').classList.add('sel');
+    b.onclick = async () => {
+      const c = c0.url ? { ...c0, g: mineG } : await getClip(c0.id);
+      if (!c) return;
+      if (cmpPick) { clearTimeout(idleT); return pickForCompare(c, b, renderMine); }
+      openClip(c.url ? c : c.id);
+    };
+  });
   idleT = setTimeout(() => { mineG = null; mineData = null; if (view === 'mine') renderMine(); }, 3 * 60 * 1000);
 }
 document.addEventListener('pointerdown', () => { if (mineG && view === 'mine') { clearTimeout(idleT); idleT = setTimeout(() => { mineG = null; renderMine(); }, 3 * 60 * 1000); } });
@@ -1415,7 +1517,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123223721';
+const APP_VERSION = '20261123224427';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
@@ -1602,5 +1704,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { springs: () => springs, getClip, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { springs: () => springs, getClip, openCompare, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
