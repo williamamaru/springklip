@@ -330,6 +330,7 @@ function drawLoop() {
   for (let i = P.length; i < 4; i++) { if (ENG === 'h264' && HP[i].dec) hpDrop(i); vs[i].cur = null; }
   if (vs[0].cur && vs[0].cur !== perf.lastShown) { perf.lastShown = vs[0].cur; perf.shown++; }
   if (ENG !== 'h264') pruneDecoded(viewTs);
+  if (S.showDet && running && cam.readyState >= 2) drawDet(cw, ch, dpr);
 }
 requestAnimationFrame(drawLoop);
 
@@ -487,6 +488,37 @@ function drawZone(R, editing) {
   }
   sx.restore();
 }
+// "Vis genkendelse": et lille live-billede i hjørnet, hvor felterne lyser op ved bevægelse og blinker grønt, når et spring gemmes.
+// Live, fordi springgenkendelsen kører på live-billedet og ikke på det forsinkede.
+const detS = new WeakMap();
+function detSet(z, lvl) { const d = detS.get(z) || {}; d.lvl = lvl; detS.set(z, d); }
+function detFlash(z) { const d = detS.get(z) || {}; d.flash = now(); detS.set(z, d); }
+function drawDet(cw, ch, dpr) {
+  const w = Math.round(cw * (cw > ch ? 0.3 : 0.45)), h = Math.round((w * CAP_H) / CAP_W);
+  const R = { x: cw - w - 10 * dpr, y: ch - h - 10 * dpr, w, h };
+  sx.save();
+  sx.drawImage(cam, R.x, R.y, R.w, R.h);
+  sx.strokeStyle = '#fff'; sx.lineWidth = 2 * dpr; sx.strokeRect(R.x, R.y, R.w, R.h);
+  const P = (q) => [R.x + q.x * R.w, R.y + q.y * R.h];
+  let lane = 0;
+  for (const z of preset().zones) {
+    const st = detS.get(z) || {}, on = Math.min(1, st.lvl || 0), hit = st.flash && now() - st.flash < 1.5;
+    const col = hit ? '46,204,113' : z.type === 'lane' ? '63,169,245' : '242,154,31';
+    sx.beginPath();
+    if (z.type === 'lane') { lanePoly(z.pts).map(P).forEach(([x, y], i) => (i ? sx.lineTo(x, y) : sx.moveTo(x, y))); sx.closePath(); }
+    else sx.rect(R.x + z.x0 * R.w, R.y + z.y0 * R.h, (z.x1 - z.x0) * R.w, (z.y1 - z.y0) * R.h);
+    sx.fillStyle = `rgba(${col},${hit ? 0.55 : 0.08 + on * 0.5})`; sx.fill();
+    sx.strokeStyle = `rgb(${col})`; sx.lineWidth = (on >= 1 || hit ? 3 : 1.5) * dpr; sx.stroke();
+    if (z.type === 'lane') { lane++; const [x, y] = P(z.pts[0]); sx.fillStyle = `rgb(${col})`; sx.font = `800 ${12 * dpr}px -apple-system,Arial,sans-serif`; sx.fillText(String(lane), x + 4 * dpr, y - 4 * dpr); }
+  }
+  sx.fillStyle = '#000c'; sx.fillRect(R.x, R.y, 118 * dpr, 22 * dpr);
+  sx.fillStyle = '#fff'; sx.font = `700 ${12 * dpr}px -apple-system,Arial,sans-serif`; sx.textBaseline = 'middle';
+  sx.fillText(S.clipOn === false ? 'Genkendelse · klip fra' : 'Genkendelse · live', R.x + 6 * dpr, R.y + 11 * dpr);
+  sx.restore();
+}
+function syncDetUI() { const b = $('detBtn'); b.classList.toggle('on', !!S.showDet); b.setAttribute('aria-pressed', !!S.showDet); }
+$('detBtn').onclick = () => { S.showDet = !S.showDet; save(); syncDetUI(); };
+syncDetUI();
 function syncPresetUI() {
   const sel = $('presetSel');
   sel.innerHTML = S.presets.map((p, i) => `<option value="${i}"${i === S.pi ? ' selected' : ''}>${esc(p.name)}${p.zones.length ? '' : ' (intet felt)'}</option>`).join('') + '<option value="new">＋ Ny opstilling</option>';
@@ -602,6 +634,7 @@ function motion(t) {
     let ch = 0, n = 0;
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; ch += diff[y * MOT_W + x]; }
     if (n) frac = Math.max(frac, (ch / n) * 100);
+    if (n) detSet(z, ch / n * 100 / S.sens);
     inCh += ch; inN += n;
   }
   const global = (allCh / g.length) * 100;
@@ -624,7 +657,7 @@ function motion(t) {
     if (t - active.start > 8) { active = null; motAbove = 0; return; } // nogen står i feltet
     if (t - lastAbove > 0.7) {
       const dur = lastAbove - active.start;
-      if (dur >= 0.25 && dur <= 6 && active.fg < 3) newSpring(active.start, lastAbove);
+      if (dur >= 0.25 && dur <= 6 && active.fg < 3) { newSpring(active.start, lastAbove); preset().zones.forEach((z) => z.type !== 'lane' && detFlash(z)); }
       active = null; motAbove = 0;
     }
   }
@@ -670,13 +703,14 @@ function laneStep(t, diff) {
     if (!L.idx.length) return;
     let n = 0, su = 0, sx2 = 0, sy2 = 0;
     for (let j = 0; j < L.idx.length; j++) if (diff[L.idx[j]]) { n++; su += L.u[j]; sx2 += L.xs[j]; sy2 += L.ys[j]; }
+    detSet(z, (n / L.idx.length) * 100 / LANE.sens);
     let T = laneT.get(z);
     if (!T) { T = { path: [], lastPush: 0, lastCheck: 0 }; laneT.set(z, T); }
     if ((n / L.idx.length) * 100 > LANE.sens && n >= 4 && t - T.lastPush >= 0.1) {
       T.path.push({ t, u: su / n, x: sx2 / n, y: sy2 / n }); T.lastPush = t;
     }
     while (T.path.length && t - T.path[0].t > LANE.keep) T.path.shift();
-    if (T.path.length && t - T.lastCheck >= 0.25) { T.lastCheck = t; laneCheck(T, t, lanes.length > 1 ? `${preset().name} · bane ${k + 1}` : preset().name, k); }
+    if (T.path.length && t - T.lastCheck >= 0.25) { T.lastCheck = t; if (laneCheck(T, t, lanes.length > 1 ? `${preset().name} · bane ${k + 1}` : preset().name, k)) detFlash(z); }
   });
 }
 function laneCheck(T, t, d, k) {
@@ -698,6 +732,7 @@ function laneCheck(T, t, d, k) {
   const end = P[best.j];
   newSpring(P[best.i].t - 0.3, end.t + 0.3, { key: 'lane' + k, d, near: { x: end.x, y: end.y } });
   T.path = P.slice(best.j + 1);
+  return true;
 }
 function newSpring(start, end, opt = {}) {
   const key = opt.key || 'air';
@@ -1380,7 +1415,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123222911';
+const APP_VERSION = '20261123223721';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
