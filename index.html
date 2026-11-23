@@ -135,7 +135,8 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
       <div class="toast" id="toast" hidden></div>
       <div class="drag" id="dragBox" hidden></div>
       <div class="zonehelp" id="zoneHelp" hidden>
-        <span>Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.</span>
+        <div class="grp seg" id="zoneKind" role="group" aria-label="Felttype"><button data-k="air" class="on">Luftfelt</button><button data-k="lane">Bane</button></div>
+        <span id="zoneTxt">Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.</span>
         <input id="zoneName" type="text" aria-label="Navn på opstilling" style="width:160px">
         <button id="zoneClear">Ryd felter</button>
         <button id="zoneDel" class="bad ghost">Slet opstilling</button>
@@ -182,7 +183,7 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
         <label>Bevægelse</label><div class="meter"><i id="meter"></i></div>
         <button id="flipBtn" class="ghost">Spejlvend</button>
         <button id="camSwitch" class="ghost">Skift kamera</button>
-        <button id="zoneBtn" class="ghost">Indstil luftfelt</button>
+        <button id="zoneBtn" class="ghost">Indstil felter</button>
       </div>
     </div>
   </section>
@@ -215,6 +216,6 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
 
 <script src="lib/supabase.js?v=2.119.0"></script>
 <script src="lib/mp4-muxer.js?v=5.2.2"></script>
-<script src="app.js?v=20261123221651"></script>
+<script src="app.js?v=20261123222911"></script>
 </body>
 </html>

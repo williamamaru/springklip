@@ -300,7 +300,7 @@ function drawLoop() {
     const R = fitRect(cw, ch);
     if (cam.readyState >= 2) sx.drawImage(cam, R.x, R.y, R.w, R.h);
     drawZone(R, true);
-    label(12 * dpr, 12 * dpr, 'Live', 'luftfelt', dpr, false);
+    label(12 * dpr, 12 * dpr, 'Live', 'felter', dpr, false);
     return;
   }
   const P = panes(cw, ch), have = ring.length ? now() - ring[0].t : 0;
@@ -456,11 +456,35 @@ function drawZone(R, editing) {
   const zs = (editing ? zoneEdit : preset().zones) || [];
   sx.save();
   sx.lineWidth = 3 * Math.min(2, devicePixelRatio || 1);
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const P = (q) => [R.x + q.x * R.w, R.y + q.y * R.h];
+  let laneNo = 0;
   zs.concat(dragZone ? [dragZone] : []).forEach((z) => {
+    if (z.type === 'lane') {
+      laneNo++;
+      const poly = lanePoly(z.pts).map(P);
+      sx.beginPath(); poly.forEach(([x, y], i) => (i ? sx.lineTo(x, y) : sx.moveTo(x, y))); sx.closePath();
+      sx.fillStyle = editing ? '#3fa9f533' : '#3fa9f518'; sx.fill();
+      sx.strokeStyle = '#3fa9f5'; sx.stroke();
+      // pil fra start mod slut, så man kan se løberetningen
+      const [s1, s2, e1, e2] = z.pts.map(P);
+      const a = [(s1[0] + s2[0]) / 2, (s1[1] + s2[1]) / 2], b = [(e1[0] + e2[0]) / 2, (e1[1] + e2[1]) / 2];
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), hl = 16 * dpr;
+      sx.beginPath(); sx.moveTo(a[0], a[1]); sx.lineTo(b[0], b[1]);
+      sx.lineTo(b[0] - hl * Math.cos(ang - 0.5), b[1] - hl * Math.sin(ang - 0.5)); sx.moveTo(b[0], b[1]);
+      sx.lineTo(b[0] - hl * Math.cos(ang + 0.5), b[1] - hl * Math.sin(ang + 0.5)); sx.stroke();
+      sx.fillStyle = '#3fa9f5'; sx.font = `800 ${16 * dpr}px -apple-system,Arial,sans-serif`; sx.fillText(`Bane ${laneNo}`, a[0] + 6 * dpr, a[1] - 6 * dpr);
+      return;
+    }
     const x = R.x + z.x0 * R.w, y = R.y + z.y0 * R.h, w = (z.x1 - z.x0) * R.w, h = (z.y1 - z.y0) * R.h;
     sx.fillStyle = editing ? '#f29a1f33' : '#f29a1f18'; sx.fillRect(x, y, w, h);
     sx.strokeStyle = '#f29a1f'; sx.strokeRect(x, y, w, h);
   });
+  // punkter til en bane, der er ved at blive tegnet
+  if (editing && lanePts.length) {
+    sx.fillStyle = '#3fa9f5';
+    lanePts.forEach((q, i) => { const [x, y] = P(q); sx.beginPath(); sx.arc(x, y, 8 * dpr, 0, Math.PI * 2); sx.fill(); sx.fillText(String(i + 1), x + 10 * dpr, y - 10 * dpr); });
+  }
   sx.restore();
 }
 function syncPresetUI() {
@@ -469,7 +493,7 @@ function syncPresetUI() {
 }
 function openZoneEdit() {
   if (!running) { toast('Start kameraet først'); syncPresetUI(); return; }
-  zoneMode = true; zoneEdit = preset().zones.map((z) => ({ ...z }));
+  zoneMode = true; zoneEdit = preset().zones.map((z) => ({ ...z })); lanePts = []; setZoneKind('air');
   $('zoneName').value = preset().name;
   $('zoneDel').hidden = S.presets.length < 2;
   $('zoneHelp').hidden = false;
@@ -494,7 +518,21 @@ function syncClipUI() {
 }
 $('clipBtn').onclick = () => { S.clipOn = S.clipOn === false; save(); syncClipUI(); toast(S.clipOn ? 'Klip slået til: spring gemmes' : 'Klip slået fra: intet bliver gemt'); };
 $('zoneBtn').onclick = openZoneEdit;
-$('zoneClear').onclick = () => { zoneEdit = []; };
+$('zoneClear').onclick = () => { zoneEdit = []; lanePts = []; };
+// To slags felter: luftfelt (bevægelse i luften = spring) og bane (bevægelse der flytter sig hurtigt langs banen = spring).
+let zoneKind = 'air', lanePts = [];
+const ZONE_TXT = {
+  air: 'Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.',
+  lane: 'Tryk på banens to hjørner, hvor gymnasterne starter, og derefter de to hjørner i den ende, hvor de lander. Tag gerne lidt luft over banen med. Op til 4 felter.',
+};
+function setZoneKind(k) {
+  zoneKind = k; lanePts = [];
+  for (const b of $('zoneKind').children) b.classList.toggle('on', b.dataset.k === k);
+  $('zoneTxt').textContent = ZONE_TXT[k];
+  // baner ligger typisk nederst i billedet: flyt hjælpeboksen op, så den ikke dækker
+  const h = $('zoneHelp'); h.style.top = k === 'lane' ? '12px' : ''; h.style.bottom = k === 'lane' ? 'auto' : '';
+}
+$('zoneKind').onclick = (e) => { const b = e.target.closest('button'); if (b) setZoneKind(b.dataset.k); };
 $('zoneDel').onclick = (e) => {
   if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
   delete e.target.dataset.sure; e.target.textContent = 'Slet opstilling';
@@ -513,11 +551,18 @@ $('zoneDone').onclick = () => {
 let dragFrom = null, dragZone = null;
 screen.addEventListener('pointerdown', (e) => {
   if (!zoneMode) return;
+  if (zoneKind === 'lane') {
+    if (zoneEdit.length >= 4) { toast('Der kan højst være 4 felter. Tryk på "Ryd felter" for at starte forfra.'); return; }
+    lanePts.push(toNorm(e));
+    if (lanePts.length === 2) toast('Godt. Tryk nu på de to hjørner i den ende, hvor de lander.');
+    if (lanePts.length === 4) { zoneEdit.push({ type: 'lane', pts: lanePts }); lanePts = []; toast('Banen er tegnet. Pilen viser løberetningen.'); }
+    return;
+  }
   const p = toNorm(e); dragFrom = p; dragZone = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
   screen.setPointerCapture(e.pointerId);
 });
 screen.addEventListener('pointermove', (e) => {
-  if (!zoneMode || !dragFrom) return;
+  if (!zoneMode || !dragFrom || zoneKind === 'lane') return;
   const p = toNorm(e);
   dragZone = { x0: Math.min(dragFrom.x, p.x), y0: Math.min(dragFrom.y, p.y), x1: Math.max(dragFrom.x, p.x), y1: Math.max(dragFrom.y, p.y) };
 });
@@ -552,6 +597,7 @@ function motion(t) {
   // højeste andel bevægelse i et af felterne (hvert felt måles for sig, så et lille felt ikke drukner)
   let frac = 0, inCh = 0, inN = 0;
   for (const z of preset().zones) {
+    if (z.type === 'lane') continue;
     const x0 = Math.floor(z.x0 * MOT_W), x1 = Math.ceil(z.x1 * MOT_W), y0 = Math.floor(z.y0 * MOT_H), y1 = Math.ceil(z.y1 * MOT_H);
     let ch = 0, n = 0;
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; ch += diff[y * MOT_W + x]; }
@@ -566,7 +612,8 @@ function motion(t) {
   m.style.width = Math.min(100, (frac / (th * 3)) * 100) + '%';
   m.classList.toggle('hot', frac > th);
   if (global > 45) return; // kameraet justerer lys/fokus
-  if (S.clipOn === false) { active = null; motAbove = 0; return; } // klip slået fra, fx under teknik
+  if (S.clipOn === false) { active = null; motAbove = 0; laneT = new WeakMap(); return; } // klip slået fra, fx under teknik
+  laneStep(t, diff);
   const above = frac > th;
   if (!active) {
     motAbove = above ? motAbove + 1 : 0;
@@ -583,15 +630,85 @@ function motion(t) {
   }
 }
 const FG_LIMIT = 12; // % af billedet uden for felterne, der bevæger sig samtidig
-function newSpring(start, end) {
-  // Starter der ny bevægelse kort efter den forrige, er det samme spring (fx træneren før afsættet): forlæng det i stedet for at lave et klip mere
-  const last = springs[springs.length - 1];
+
+// ---------- Baner ----------
+// En bane er en firkant på gulvet (to hjørner ved start, to ved landing). Et spring på banen er bevægelse,
+// der flytter sig hurtigt fra start mod landing. At gå tilbage (modsat retning) eller stå og vente tæller ikke.
+// Hver bane følges for sig, så flere baner kan køre samtidig.
+const LANE = { minDist: 0.35, minSpeed: 0.12, maxDur: 10, sens: 0.4, settle: 1.0, keep: 15 };
+let laneT = new WeakMap(); // bane -> { path: [{t,u,x,y}], lastPush }
+const laneM = new WeakMap(); // bane -> forudberegnet maske på bevægelsesgitteret
+function lanePoly(pts) {
+  // to hjørner ved start og to ved slut, i den rækkefølge der ikke krydser sig selv
+  const [s1, s2, e1, e2] = pts;
+  if (!e1) return pts;
+  const d = (a, b) => Math.hypot((a.x - b.x) * 16, (a.y - b.y) * 9);
+  return d(s2, e2) + d(e1, s1) <= d(s2, e1) + d(e2, s1) ? [s1, s2, e2, e1] : [s1, s2, e1, e2];
+}
+function laneMask(z) {
+  let m = laneM.get(z);
+  if (m) return m;
+  const poly = lanePoly(z.pts).map((q) => [q.x * 16, q.y * 9]);
+  const [s1, s2, e1, e2] = z.pts.map((q) => [q.x * 16, q.y * 9]);
+  const lineDist = (p, a, b) => Math.abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1])) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1);
+  const inside = (p) => { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const [xi, yi] = poly[i], [xj, yj] = poly[j]; if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) c = !c; } return c; };
+  const idx = [], u = [], xs = [], ys = [];
+  for (let y = 0; y < MOT_H; y++) for (let x = 0; x < MOT_W; x++) {
+    const nx = (x + 0.5) / MOT_W, ny = (y + 0.5) / MOT_H, p = [nx * 16, ny * 9];
+    if (!inside(p)) continue;
+    const ds = lineDist(p, s1, s2), de = lineDist(p, e1, e2);
+    idx.push(y * MOT_W + x); u.push(ds / (ds + de || 1)); xs.push(nx); ys.push(ny);
+  }
+  m = { idx, u, xs, ys };
+  laneM.set(z, m);
+  return m;
+}
+function laneStep(t, diff) {
+  const zs = preset().zones, lanes = zs.filter((z) => z.type === 'lane');
+  lanes.forEach((z, k) => {
+    const L = laneMask(z);
+    if (!L.idx.length) return;
+    let n = 0, su = 0, sx2 = 0, sy2 = 0;
+    for (let j = 0; j < L.idx.length; j++) if (diff[L.idx[j]]) { n++; su += L.u[j]; sx2 += L.xs[j]; sy2 += L.ys[j]; }
+    let T = laneT.get(z);
+    if (!T) { T = { path: [], lastPush: 0, lastCheck: 0 }; laneT.set(z, T); }
+    if ((n / L.idx.length) * 100 > LANE.sens && n >= 4 && t - T.lastPush >= 0.1) {
+      T.path.push({ t, u: su / n, x: sx2 / n, y: sy2 / n }); T.lastPush = t;
+    }
+    while (T.path.length && t - T.path[0].t > LANE.keep) T.path.shift();
+    if (T.path.length && t - T.lastCheck >= 0.25) { T.lastCheck = t; laneCheck(T, t, lanes.length > 1 ? `${preset().name} · bane ${k + 1}` : preset().name, k); }
+  });
+}
+function laneCheck(T, t, d, k) {
+  const P = T.path, n = P.length;
+  if (n < 5) return;
+  // udglat positionen lidt, så enkelte urolige billeder ikke tæller
+  const us = P.map((_, i) => { let a = 0, c = 0; for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { a += P[j].u; c++; } return a / c; });
+  let best = null;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const dt = P[j].t - P[i].t, du = us[j] - us[i];
+    if (dt < 0.8 || dt > LANE.maxDur || du < LANE.minDist || du / dt < LANE.minSpeed) continue;
+    if (!best || du > best.du || (du === best.du && j > best.j)) best = { i, j, du };
+  }
+  if (!best) return;
+  // springet er færdigt, når bevægelsen ikke er kommet længere frem i et sekund
+  const endT = P[best.j].t;
+  const further = us.slice(best.j + 1).some((v) => v > us[best.j] + 0.03);
+  if (t - endT < LANE.settle || further) return;
+  const end = P[best.j];
+  newSpring(P[best.i].t - 0.3, end.t + 0.3, { key: 'lane' + k, d, near: { x: end.x, y: end.y } });
+  T.path = P.slice(best.j + 1);
+}
+function newSpring(start, end, opt = {}) {
+  const key = opt.key || 'air';
+  // Starter der ny bevægelse kort efter den forrige (samme felt), er det samme spring (fx træneren før afsættet): forlæng det i stedet for at lave et klip mere
+  const last = [...springs].reverse().find((x) => x.key === key);
   if (last && last.state === 'reading' && start - last.end < 2 && end - last.start <= 10) {
     last.end = Math.max(last.end, end);
     return;
   }
   springNo++;
-  const s = { id: `${Date.now()}-${springNo}`, d: preset().name, start, end, vt: Math.round((cam.currentTime - (now() - start)) * 10) / 10, votes: {}, state: 'reading', wall: Date.now() - (now() - start) * 1000 };
+  const s = { id: `${Date.now()}-${springNo}`, key, near: opt.near || null, d: opt.d || preset().name, start, end, vt: Math.round((cam.currentTime - (now() - start)) * 10) / 10, votes: {}, state: 'reading', wall: Date.now() - (now() - start) * 1000 };
   springs.push(s);
   if (lockFrom === null || start - 1.5 < lockFrom) lockFrom = start - 1.5;
   toast(`Spring fundet · læser nummer …`);
@@ -607,6 +724,7 @@ if (worker) worker.onmessage = (e) => {
   for (const s of springs) {
     if (s.state !== 'reading' || t < s.end - 0.2 || t > s.end + TAG_WINDOW) continue;
     for (const f of found) {
+      if (s.near && (Math.abs(f.x - s.near.x) > 0.15 || f.y > s.near.y + 0.08 || f.y < s.near.y - 0.45)) continue; // andre baner
       const v = s.votes[f.id] || (s.votes[f.id] = { w: 0, n: 0, xs: [], ys: [] });
       v.w += f.size; v.n++; v.xs.push(f.x); v.ys.push(f.y);
     }
@@ -1262,7 +1380,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261123221651';
+const APP_VERSION = '20261123222911';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
@@ -1449,5 +1567,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { springs: () => springs, getClip, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { springs: () => springs, getClip, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
