@@ -116,6 +116,22 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
 .cmpbox{display:grid;grid-template-columns:1fr 1fr;gap:4px;min-height:0}.cmpbox.stack{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
 .cmpbox>div{position:relative;min-height:0;min-width:0}.cmpbox span{position:absolute;left:8px;top:8px;background:#000c;color:#fff;padding:4px 8px;border-radius:6px;font-weight:700;font-size:14px}
 #holdBtn.rec{background:#d63c2f;border-color:#d63c2f;color:#fff;font-weight:700}
+/* indtjekning */
+.modal.ci{grid-template-rows:auto minmax(0,1fr);background:var(--bg)}
+.ciBody{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;padding:0 12px 12px;min-height:0}
+.ciMain{overflow:auto;display:grid;align-content:start;gap:14px;min-height:0}
+.modal #ciCam{width:auto;height:auto;max-width:100%;max-height:32vh;justify-self:center;border-radius:12px}
+.ciMsg{font-size:34px;font-weight:800;text-align:center;line-height:1.2}
+.ciMsg small{display:block;font-size:17px;font-weight:500;color:var(--muted);margin-top:6px}
+.ciMsg.ok{color:var(--ok);font-size:48px}.ciMsg.bad{color:var(--bad)}
+.ciNames{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.ciNames button{min-height:76px;font-size:22px;font-weight:700;display:grid;gap:2px;align-content:center}
+.ciNames button small{font-size:13px;font-weight:500;color:var(--muted)}
+.ciNames button.on{border-color:var(--acc)}
+.ciList{overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;min-height:0}
+.ciList h3{margin:0 0 8px;font-size:17px}
+.ciRow{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)}.ciRow span{flex:1}
+@media (max-width:700px){.ciBody{grid-template-columns:1fr;grid-template-rows:auto auto}.ciMsg{font-size:26px}}
 .clip.sel{outline:4px solid var(--acc);outline-offset:-2px}
 @media (max-width:640px){.lag{font-size:20px}.rec span.long{display:none}}
 </style>
@@ -166,6 +182,7 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
       <div class="grp">
         <button id="clipBtn" aria-pressed="true">Klip: til</button>
         <button id="holdBtn" aria-pressed="false">Holdomgang</button>
+        <button id="ciBtn">Indtjekning</button>
         <select id="presetSel" aria-label="Opstilling: hvilket redskab tæller som spring" style="width:auto;min-width:130px;font-weight:700"></select>
       </div>
       <div class="grp seg" id="layoutSeg" role="group" aria-label="Antal billeder">
@@ -218,6 +235,14 @@ td.code{font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:.15em;wh
     <button id="plSlow">Slowmotion</button>
     <button id="plReplay">Afspil igen</button>
     <a id="plSave" download hidden><button>Gem video</button></a>
+  </div>
+</div>
+
+<div class="modal ci" id="ci" hidden>
+  <div class="top"><b>Indtjekning</b><span id="ciLockTxt" class="muted"></span><button id="ciLock">Lås indtjekning</button><button id="ciNew" class="ghost bad">Ny træning</button><button id="ciClose" class="acc">Luk</button></div>
+  <div class="ciBody">
+    <div class="ciMain"><canvas id="ciCam" width="480" height="270"></canvas><div id="ciMsg" class="ciMsg"></div><div id="ciNames" class="ciNames"></div><div id="ciPin" hidden></div></div>
+    <aside class="ciList"><h3>Tjekket ind i dag</h3><div id="ciList"></div></aside>
   </div>
 </div>
 

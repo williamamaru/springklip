@@ -666,6 +666,7 @@ function motion(t) {
   if (global > 45) camCalmUntil = t + 3;
   if (t < camCalmUntil) { active = null; motAbove = 0; laneT = new WeakMap(); return; }
   if (S.clipOn === false) { active = null; motAbove = 0; laneT = new WeakMap(); return; } // klip slået fra, fx under teknik
+  if (ci.open) { active = null; motAbove = 0; laneT = new WeakMap(); return; } // indtjekning: ingen spring imens
   laneStep(t, diff);
   const above = frac > th;
   if (!active) {
@@ -770,12 +771,13 @@ function newSpring(start, end, opt = {}) {
 }
 
 // ---------- Nummerskilte ----------
-let worker = null, tagBusy = false, lastTag = 0;
+let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring';
 try { worker = new Worker('worker.js'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onmessage = (e) => {
   tagBusy = false;
   const { t, found } = e.data;
+  if (tagKind === 'ci') { ciOnRead(found); return; }
   for (const s of springs) {
     if (s.state !== 'reading' || t < s.end - 0.2 || t > s.end + TAG_WINDOW) continue;
     for (const f of found) {
@@ -788,28 +790,31 @@ if (worker) worker.onmessage = (e) => {
 function maybeReadTags(t) {
   const reading = springs.filter((s) => s.state === 'reading');
   for (const s of reading) if (t > s.end + TAG_WINDOW) finishSpring(s);
-  if (!worker || tagBusy || t - lastTag < 0.22) return;
-  if (!springs.some((s) => s.state === 'reading' && t >= s.end - 0.2)) return;
-  lastTag = t;
+  if (!worker || tagBusy) return;
+  const forSpring = springs.some((s) => s.state === 'reading' && t >= s.end - 0.2);
+  if (forSpring) { if (t - lastTag < 0.22) return; }
+  else if (!ciWantsRead() || t - lastTag < CI_READ_GAP) return; // indtjekning: ca. 4 læsninger/s
+  lastTag = t; tagKind = forSpring ? 'spring' : 'ci';
   const vw = cam.videoWidth, vh = cam.videoHeight;
   if (!vw) return;
-  const sc = Math.min(1, 1920 / vw);
+  // til indtjekning holdes skiltet tæt på, så et mindre billede er nok (sparer kræfter)
+  const sc = Math.min(1, (forSpring ? 1920 : 960) / vw);
   const w = Math.round(vw * sc), h = Math.round(vh * sc);
   tagBusy = true;
   if (typeof OffscreenCanvas !== 'undefined' && window.createImageBitmap) {
-    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: S.roster.length }, [bmp])).catch(() => { tagBusy = false; });
+    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: tagMax() }, [bmp])).catch(() => { tagBusy = false; });
     return;
   }
   if (tagC.width !== w) { tagC.width = w; tagC.height = h; }
   tagX.drawImage(cam, 0, 0, w, h);
   const img = tagX.getImageData(0, 0, w, h);
-  worker.postMessage({ w, h, buf: img.data.buffer, t, maxId: S.roster.length }, [img.data.buffer]);
+  worker.postMessage({ w, h, buf: img.data.buffer, t, maxId: tagMax() }, [img.data.buffer]);
 }
 const recentTags = []; // {g, t}
 const bgTags = []; // stillestående skilt-lignende mønstre i baggrunden
 const log = [];
 function finishSpring(s) {
-  log.push({ vt: s.vt, dur: Math.round((s.end - s.start) * 10) / 10, votes: Object.fromEntries(Object.entries(s.votes).map(([k, v]) => [k, v.n])) });
+  log.push({ ci: ciActive(), vt: s.vt, dur: Math.round((s.end - s.start) * 10) / 10, votes: Object.fromEntries(Object.entries(s.votes).map(([k, v]) => [k, v.n])) });
     // Regler for at et nummer tæller:
   // 1) set mindst 3 gange i vinduet efter landingen og ikke spredt over hele billedet
   // 2) ikke en stillestående "skilt-lignende" ting i baggrunden: står den helt stille og er set samme sted
@@ -835,13 +840,163 @@ function finishSpring(s) {
   let pick = ok[0];
   const runner = cand.find((c) => pick && c.id !== pick.id);
   if (pick && runner && pick.w < runner.w * 1.5) pick = null;
-  s.g = pick ? pick.id : 0;
-  if (s.g) recentTags.push({ g: s.g, t: s.end });
+  // skilt-id gemmes altid på klippet. Med indtjekning i dag er skiltet generisk: slå gymnasten op i koblingerne.
+  s.tag = pick ? pick.id : null;
+  s.g = tagToG(s.tag);
+  if (s.tag) recentTags.push({ g: s.tag, t: s.end });
   while (recentTags.length > 20) recentTags.shift();
   s.state = 'clipping';
-  toast(s.g ? `Spring gemt: ${gName(s.g)}` : 'Spring gemt: ukendt nummer');
+  toast(s.g ? `Spring gemt: ${gName(s.g)}` : s.tag ? `Spring gemt: skilt ${s.tag} er ikke tjekket ind` : 'Spring gemt: ukendt nummer');
   queueClip(s);
 }
+
+// ---------- Indtjekning ----------
+// Valgfrit: skiltene er generiske. Ved træningens start holder gymnasten sit skilt op foran iPad'en og vælger sit navn.
+// Koblingerne (skilt -> gymnast) gælder resten af dagen. Er der ingen indtjekning i dag, er skilt N = gymnast nr. N som før.
+const CI_READ_GAP = 0.25, CI_NEED = 3;
+const ci = { open: false, state: 'scan', tag: 0, g: 0, msg: '', sub: '', streak: { id: 0, n: 0 }, ign: null, timer: 0, raf: 0, sure: false };
+function dayKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function ciData() {
+  const d = dayKey();
+  if (!S.checkin || S.checkin.day !== d || typeof S.checkin.map !== 'object' || !S.checkin.map) { S.checkin = { day: d, map: {}, locked: false }; save(); }
+  return S.checkin;
+}
+const ciActive = () => Object.keys(ciData().map).length > 0;
+function tagToG(tag) {
+  if (!tag) return 0;
+  if (!ciActive()) return tag; // som hidtil: skilt N = nr. N
+  return +ciData().map[tag] || 0;
+}
+const tagMax = () => (ciActive() || ci.open ? Math.max(30, S.roster.length) : S.roster.length);
+const ciName = (g) => { const r = S.roster.find((x) => x.n === g); return r && r.name ? r.name : `Nr. ${g}`; };
+const ciTagOf = (g) => { const m = ciData().map; const k = Object.keys(m).find((t) => +m[t] === g); return k ? +k : 0; };
+const ciWantsRead = () => ci.open && (ci.state === 'scan' || ci.state === 'done' || ci.state === 'locked');
+function ciOnRead(found) {
+  if (!ci.open) return;
+  const t = now();
+  let f = found.slice().sort((a, b) => b.size - a.size)[0] || null; // det største skilt i billedet
+  if (ci.ign) {
+    if (found.some((x) => x.id === ci.ign.id)) { ci.ign.last = t; if (f && f.id === ci.ign.id) f = null; }
+    else if (t - ci.ign.last > 1.5) ci.ign = null;
+  }
+  if (!f) { ci.streak = { id: 0, n: 0 }; return; }
+  ci.streak = ci.streak.id === f.id ? { id: f.id, n: ci.streak.n + 1 } : { id: f.id, n: 1 };
+  if (ci.streak.n < CI_NEED || ci.state !== 'scan') return;
+  ci.streak = { id: 0, n: 0 };
+  ciSeen(f.id);
+}
+function ciSeen(tag) {
+  ci.tag = tag; ci.ign = { id: tag, last: now() };
+  if (ciData().locked) {
+    const g = +ciData().map[tag] || 0;
+    ciFlash('locked', 'Indtjekningen er låst', g ? `Skilt ${tag} = ${ciName(g)}` : `Skilt ${tag} er ikke tjekket ind`, 2500);
+    return;
+  }
+  ci.state = 'pick'; ciRender();
+}
+function ciFlash(state, msg, sub, ms) {
+  clearTimeout(ci.timer);
+  ci.state = state; ci.msg = msg; ci.sub = sub; ciRender();
+  ci.timer = setTimeout(() => { if (ci.state === state) { ci.state = 'scan'; ciRender(); } }, ms);
+}
+function ciPick(g) {
+  if (ciData().locked) return;
+  const m = ciData().map, tag = ci.tag, cur = +m[tag] || 0;
+  if (cur && cur !== g && ci.state !== 'ask') { ci.g = g; ci.state = 'ask'; ciRender(); return; }
+  ciAssign(tag, g);
+}
+function ciAssign(tag, g) {
+  const d = ciData();
+  if (d.locked || !tag || !g) return false;
+  const old = ciTagOf(g);
+  if (old && old !== tag) delete d.map[old]; // én gymnast = ét skilt
+  d.map[tag] = g; save();
+  ci.ign = { id: tag, last: now() };
+  ciFlash('done', `Skilt ${tag} = ${ciName(g)} ✓`, old && old !== tag ? `Flyttet fra skilt ${old}` : '', 1500);
+  return true;
+}
+function ciRemove(tag) { const d = ciData(); if (d.locked) return; delete d.map[tag]; save(); ciRender(); }
+function ciOpen() {
+  if (!running) { toast('Start kameraet først'); return; }
+  if (!worker) { toast('Skilte kan ikke læses i denne browser'); return; }
+  ciData();
+  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false;
+  active = null; motAbove = 0;
+  $('ci').hidden = false; ciRender(); ciDraw();
+}
+function ciClose() {
+  ci.open = false; clearTimeout(ci.timer); cancelAnimationFrame(ci.raf);
+  $('ci').hidden = true; $('ciPin').innerHTML = '';
+  prevMot = null; active = null; motAbove = 0; // start springgenkendelsen roligt igen
+  syncCiBtn();
+}
+function ciDraw() {
+  if (!ci.open) return;
+  ci.raf = requestAnimationFrame(ciDraw);
+  const c = $('ciCam');
+  if (cam.readyState < 2 || !cam.videoWidth) return;
+  const w = 480, h = Math.round((w * cam.videoHeight) / cam.videoWidth);
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  c.getContext('2d').drawImage(cam, 0, 0, w, h);
+}
+function syncCiBtn() {
+  const n = ciActive() ? Object.keys(ciData().map).length : 0;
+  $('ciBtn').textContent = n ? `Indtjekning (${n})` : 'Indtjekning';
+  $('ciBtn').classList.toggle('on', n > 0);
+}
+function ciRender() {
+  if (!ci.open) return;
+  const d = ciData(), locked = d.locked;
+  $('ciLock').textContent = locked ? 'Lås op' : 'Lås indtjekning';
+  $('ciLockTxt').textContent = locked ? '🔒 Låst' : '';
+  $('ciNew').hidden = locked;
+  if (!ci.sure) $('ciNew').textContent = 'Ny træning';
+  const msg = $('ciMsg'), names = $('ciNames'), pin = $('ciPin');
+  names.innerHTML = ''; pin.hidden = ci.state !== 'pin'; $('ciCam').hidden = ci.state === 'pin';
+  if (ci.state !== 'pin') pin.innerHTML = '';
+  if (ci.state === 'scan') {
+    msg.innerHTML = locked ? 'Indtjekningen er låst<small>Tryk "Lås op" og skriv trænerkoden for at ændre</small>' : 'Hold dit skilt op foran kameraet<small>Hold det tæt på og stille</small>';
+  } else if (ci.state === 'pick') {
+    msg.innerHTML = `Skilt ${ci.tag} – hvem er du?`;
+    const named = S.roster.filter((g) => g.name), list = named.length ? named : S.roster, m = d.map;
+    names.innerHTML = list.map((g) => { const t = ciTagOf(g.n), mine = +m[ci.tag] === g.n; return `<button data-cig="${g.n}" class="${mine ? 'on' : ''}">${esc(ciName(g.n))}${t ? `<small>skilt ${t}</small>` : ''}</button>`; }).join('')
+      + '<button id="ciCancel" class="ghost">Annullér</button>';
+  } else if (ci.state === 'ask') {
+    msg.innerHTML = `Skilt ${ci.tag} er allerede ${esc(ciName(+d.map[ci.tag]))}<small>Skal skiltet være ${esc(ciName(ci.g))} i stedet?</small>`;
+    names.innerHTML = `<button id="ciYes" class="acc">Ja, skift til ${esc(ciName(ci.g))}</button><button id="ciNo">Nej</button>`;
+  } else if (ci.state === 'done' || ci.state === 'locked') {
+    msg.innerHTML = `${esc(ci.msg)}${ci.sub ? `<small>${esc(ci.sub)}</small>` : ''}`;
+  } else if (ci.state === 'pin') {
+    msg.innerHTML = '';
+  }
+  msg.className = 'ciMsg' + (ci.state === 'done' ? ' ok' : ci.state === 'locked' ? ' bad' : '');
+  names.querySelectorAll('[data-cig]').forEach((b) => (b.onclick = () => ciPick(+b.dataset.cig)));
+  if ($('ciCancel')) $('ciCancel').onclick = () => { ci.state = 'scan'; ciRender(); };
+  if ($('ciYes')) $('ciYes').onclick = () => ciAssign(ci.tag, ci.g);
+  if ($('ciNo')) $('ciNo').onclick = () => { ci.state = 'pick'; ciRender(); };
+  const tags = Object.keys(d.map).map(Number).sort((a, b) => a - b);
+  $('ciList').innerHTML = tags.length
+    ? tags.map((t) => `<div class="ciRow"><b>Skilt ${t}</b><span>${esc(ciName(+d.map[t]))}</span>${locked ? '' : `<button class="ghost bad" data-cirm="${t}">Fjern</button>`}</div>`).join('')
+    : '<p class="muted">Ingen er tjekket ind i dag. Uden indtjekning gælder skiltets nummer (skilt 7 = nr. 7).</p>';
+  $('ciList').querySelectorAll('[data-cirm]').forEach((b) => (b.onclick = () => ciRemove(+b.dataset.cirm)));
+  syncCiBtn();
+}
+$('ciBtn').onclick = ciOpen;
+$('ciClose').onclick = ciClose;
+$('ciLock').onclick = () => {
+  const d = ciData();
+  if (!d.locked) { d.locked = true; save(); ci.state = 'scan'; ciRender(); toast('Indtjekningen er låst'); return; }
+  // lås op kræver trænerkoden: brug den samme kodeskærm som Klip og Opsætning
+  if (!trainerOk) { $('clipsWrap').innerHTML = ''; $('setupWrap').innerHTML = ''; } // undgå to kodefelter med samme id
+  clearTimeout(ci.timer); ci.state = 'pin'; ciRender();
+  pinScreen($('ciPin'), 'Lås indtjekningen op', () => { ciData().locked = false; save(); ci.state = 'scan'; ciRender(); toast('Indtjekningen er låst op'); });
+};
+$('ciNew').onclick = () => {
+  if (ciData().locked) return;
+  if (!ci.sure) { ci.sure = true; $('ciNew').textContent = 'Tryk igen: slet dagens indtjekning'; setTimeout(() => { ci.sure = false; ciRender(); }, 4000); return; }
+  ci.sure = false; S.checkin = { day: dayKey(), map: {}, locked: false }; save(); ci.state = 'scan'; ciRender(); toast('Ny træning: indtjekningen er nulstillet');
+};
+syncCiBtn();
 
 // ---------- Klip ----------
 const clipQ = [];
@@ -885,7 +1040,7 @@ async function makeClip(s, frames) {
   const mid = frames[Math.floor(frames.length / 2)];
   const thumb = await thumbOf(mid.blob);
   const dur = frames[frames.length - 1].t - frames[0].t;
-  const base = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, dur: Math.round(dur * 10) / 10, thumb };
+  const base = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, tag: s.tag ?? null, dur: Math.round(dur * 10) / 10, thumb };
   const mime = pickMime();
   if (mime && recC.captureStream) {
     const first = await createImageBitmap(frames[0].blob);
@@ -1182,17 +1337,17 @@ let remoteCache = new Map();
 async function allClips() {
   const local = await listClips();
   if (!cloudTrainer) return local;
-  const { data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d').order('at', { ascending: false }).limit(500);
+  const { data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d, tag').order('at', { ascending: false }).limit(500);
   if (error) return local;
   remoteCache = new Map();
   const byId = new Map(local.map((c) => [c.id, c]));
   const out = local.slice();
   for (const r of data || []) {
-    const m = { id: r.id, g: r.g, at: Date.parse(r.at), dur: r.dur, path: r.path, thumb: r.thumb, d: r.d, cloud: true, remote: true };
+    const m = { id: r.id, g: r.g, at: Date.parse(r.at), dur: r.dur, path: r.path, thumb: r.thumb, d: r.d, tag: r.tag ?? null, cloud: true, remote: true };
     remoteCache.set(r.id, m);
     const l = byId.get(r.id);
     if (!l) out.push(m);
-    else { l.cloud = true; if (l.g !== r.g) l.g = r.g; } // skyen vinder, hvis det er rettet på en anden enhed
+    else { l.cloud = true; if (l.g !== r.g) l.g = r.g; if (l.tag == null && r.tag != null) l.tag = r.tag; } // skyen vinder, hvis det er rettet på en anden enhed
   }
   return out.sort((a, b) => b.at - a.at);
 }
@@ -1230,6 +1385,7 @@ async function renderClips() {
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
         <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
+          ${!c.g && c.tag ? `<span class="muted" style="font-size:14px">Skilt ${c.tag}</span>` : ''}
           <select data-g="${c.id}" aria-label="Gymnast">${opts(c.g)}</select>
           <button class="bad ghost" data-del="${c.id}">Slet</button></div></div>`).join('')}</div>`
       : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
@@ -1279,7 +1435,7 @@ async function renderAssign(skip) {
   const c = await getAny(unk[skip].id);
   const named = S.roster.filter((g) => g.name);
   const list = named.length ? named : S.roster;
-  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
+  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + c.tag : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
       <button id="asDone">Færdig</button></div>
     <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
       ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${c.thumb}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
@@ -1492,7 +1648,7 @@ async function cloudUpload(c) {
   const path = `${c.id}.${ext}`;
   const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true });
   if (up.error) return false;
-  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null });
+  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null, tag: c.tag ?? null });
   if (ins.error) return false;
   const fresh = await getClip(c.id);
   if (fresh) { fresh.cloud = true; fresh.path = path; await putClip(fresh); }
@@ -1750,7 +1906,7 @@ async function makeClip264(s, a, b) {
   const mid = ch.findIndex((f) => f.t >= (s.start + s.end) / 2);
   const thumb = await thumb264(ch, mid < 0 ? ch.length >> 1 : mid);
   const dur = ch[ch.length - 1].t - t0;
-  const c = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, dur: Math.round(dur * 10) / 10, thumb, blob, mime: 'video/mp4' };
+  const c = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, tag: s.tag ?? null, dur: Math.round(dur * 10) / 10, thumb, blob, mime: 'video/mp4' };
   await putClip(c); refreshLists(); cloudUpload(c);
   return true;
 }
@@ -1773,5 +1929,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { ci: { open: ciOpen, close: ciClose, state: () => ci, data: ciData, assign: ciAssign, seen: ciSeen, pick: ciPick, read: ciOnRead, tagToG }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
