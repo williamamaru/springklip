@@ -779,7 +779,7 @@ function newSpring(start, end, opt = {}) {
 
 // ---------- Nummerskilte ----------
 let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring';
-try { worker = new Worker('worker.js'); } catch { worker = null; }
+try { worker = new Worker('worker.js?v=20261125234230'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onmessage = (e) => {
   tagBusy = false;
@@ -809,13 +809,13 @@ function maybeReadTags(t) {
   const w = Math.round(vw * sc), h = Math.round(vh * sc);
   tagBusy = true;
   if (typeof OffscreenCanvas !== 'undefined' && window.createImageBitmap) {
-    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: tagMax() }, [bmp])).catch(() => { tagBusy = false; });
+    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: tagMax(), ci: !forSpring }, [bmp])).catch(() => { tagBusy = false; });
     return;
   }
   if (tagC.width !== w) { tagC.width = w; tagC.height = h; }
   tagX.drawImage(cam, 0, 0, w, h);
   const img = tagX.getImageData(0, 0, w, h);
-  worker.postMessage({ w, h, buf: img.data.buffer, t, maxId: tagMax() }, [img.data.buffer]);
+  worker.postMessage({ w, h, buf: img.data.buffer, t, maxId: tagMax(), ci: !forSpring }, [img.data.buffer]);
 }
 const recentTags = []; // {g, t}
 const bgTags = []; // stillestående skilt-lignende mønstre i baggrunden
@@ -881,7 +881,12 @@ const ciWantsRead = () => ci.open && (ci.state === 'scan' || ci.state === 'done'
 function ciOnRead(found) {
   if (!ci.open) return;
   const t = now();
-  let f = found.slice().sort((a, b) => b.size - a.size)[0] || null; // det største skilt i billedet
+  const srt = found.slice().sort((a, b) => b.size - a.size);
+  let f = srt[0] || null; // det største skilt i billedet
+  // to skilte af næsten samme størrelse (fx en hel PDF-side med to skilte): tæl ikke, bed om kun ét
+  const multi = !!(srt[1] && srt[1].size >= srt[0].size * 0.75);
+  if (multi !== ci.multi) { ci.multi = multi; if (ci.state === 'scan') ciRender(); }
+  if (multi) { ci.streak = { id: 0, n: 0 }; return; }
   if (ci.ign) {
     if (found.some((x) => x.id === ci.ign.id)) { ci.ign.last = t; if (f && f.id === ci.ign.id) f = null; }
     else if (t - ci.ign.last > 1.5) ci.ign = null;
@@ -927,7 +932,7 @@ function ciOpen() {
   if (!running) { toast('Start kameraet først'); return; }
   if (!worker) { toast('Skilte kan ikke læses i denne browser'); return; }
   ciData();
-  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = '';
+  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = ''; ci.multi = false;
   active = null; motAbove = 0;
   $('ci').hidden = false; ciRender(); ciDraw();
   ciCamOp(ciToFront);
@@ -999,7 +1004,7 @@ function ciRender() {
   names.innerHTML = ''; pin.hidden = ci.state !== 'pin'; $('ciCam').hidden = ci.state === 'pin';
   if (ci.state !== 'pin') pin.innerHTML = '';
   if (ci.state === 'scan') {
-    msg.innerHTML = locked ? 'Indtjekningen er låst<small>Tryk "Lås op" og skriv trænerkoden for at ændre</small>' : 'Hold dit skilt op foran kameraet<small>Hold det tæt på og stille</small>';
+    msg.innerHTML = locked ? 'Indtjekningen er låst<small>Tryk "Lås op" og skriv trænerkoden for at ændre</small>' : (ci.multi ? 'Hold kun ét skilt op<small>Der er flere skilte i billedet. Hold ét skilt tæt på kameraet</small>' : 'Hold dit skilt op foran kameraet<small>Hold ét skilt tæt på kameraet og stille</small>');
   } else if (ci.state === 'pick') {
     msg.innerHTML = `Skilt ${ci.tag} – hvem er du?`;
     const named = S.roster.filter((g) => g.name), list = named.length ? named : S.roster, m = d.map;
@@ -1898,7 +1903,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261125232039';
+const APP_VERSION = '20261125234230';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });

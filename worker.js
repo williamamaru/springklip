@@ -5,7 +5,7 @@ const detector = new AR.Detector({ dictionaryName: 'ARUCO_4X4_1000', maxHammingD
 
 let oc = null, ox = null;
 onmessage = (e) => {
-  const { w, h, buf, bmp, t, maxId } = e.data;
+  const { w, h, buf, bmp, t, maxId, ci } = e.data;
   let found = [];
   try {
     let data;
@@ -16,7 +16,21 @@ onmessage = (e) => {
       bmp.close();
       data = ox.getImageData(0, 0, w, h).data;
     } else data = new Uint8ClampedArray(buf);
-    const markers = detector.detect({ width: w, height: h, data });
+    let markers;
+    if (ci) {
+      // kun indtjekning: ingen "for tæt på"-sortering (smal hvid kant kasserede ellers selve skiltet), og spejlet reserve
+      detector.notTooNear = (c) => c;
+      markers = detector.detect({ width: w, height: h, data });
+      if (!markers.length) {
+        const f = new Uint8ClampedArray(data.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const a = (y * w + x) * 4, b = (y * w + (w - 1 - x)) * 4; f[a] = data[b]; f[a + 1] = data[b + 1]; f[a + 2] = data[b + 2]; f[a + 3] = 255; }
+        markers = detector.detect({ width: w, height: h, data: f });
+        markers.forEach((m) => m.corners.forEach((c) => { c.x = w - 1 - c.x; }));
+      }
+    } else {
+      detector.notTooNear = AR.Detector.prototype.notTooNear;
+      markers = detector.detect({ width: w, height: h, data });
+    }
     found = markers
       .filter((m) => m.id >= 1 && m.id <= maxId)
       .map((m) => {
@@ -28,6 +42,7 @@ onmessage = (e) => {
         }
         return { id: m.id, size: per / 4, x: (c[0].x + c[2].x) / 2 / w, y: (c[0].y + c[2].y) / 2 / h };
       });
+    if (ci) { const best = {}; for (const m of found) if (!best[m.id] || m.size > best[m.id].size) best[m.id] = m; found = Object.values(best); }
   } catch (err) {
     found = [];
   }
