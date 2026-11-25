@@ -198,6 +198,8 @@ function addFrame(t, blob, extra) {
 }
 function onFrame(t) {
   updCap();
+  // frontkameraet (under indtjekning) bruges kun til at læse skilte: ingen billeder i bufferen, ingen spring, ingen klip
+  if (ci.front) { maybeReadTags(t); return; }
   if (ENG === 'h264') h264Encode(t);
   else if (encW) {
     if (encPending < 4) {
@@ -378,13 +380,16 @@ $('pause').onclick = () => {
 $('toDelay').onclick = () => resetLags();
 $('flipBtn').onclick = () => { S.flip = !S.flip; save(); $('flipBtn').classList.toggle('on', S.flip); };
 $('flipBtn').classList.toggle('on', S.flip);
+const camGet = (facing, exact) => navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: exact ? { exact: facing } : facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
+async function camUse(ns) {
+  stream.getTracks().forEach((t) => t.stop());
+  stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null; capLoop();
+}
 $('camSwitch').onclick = async () => {
   S.facing = S.facing === 'environment' ? 'user' : 'environment'; save();
   if (!running || !stream) return;
   try {
-    const ns = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: S.facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
-    stream.getTracks().forEach((t) => t.stop());
-    stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null; capLoop();
+    await camUse(await camGet(S.facing));
     toast(S.facing === 'user' ? 'Frontkamera' : 'Bagkamera');
   } catch { toast('Kunne ikke skifte kamera'); }
 };
@@ -854,7 +859,7 @@ function finishSpring(s) {
 // Valgfrit: skiltene er generiske. Ved træningens start holder gymnasten sit skilt op foran iPad'en og vælger sit navn.
 // Koblingerne (skilt -> gymnast) gælder resten af dagen. Er der ingen indtjekning i dag, er skilt N = gymnast nr. N som før.
 const CI_READ_GAP = 0.25, CI_NEED = 3;
-const ci = { open: false, state: 'scan', tag: 0, g: 0, msg: '', sub: '', streak: { id: 0, n: 0 }, ign: null, timer: 0, raf: 0, sure: false };
+const ci = { front: false, note: '', camOp: Promise.resolve(), open: false, state: 'scan', tag: 0, g: 0, msg: '', sub: '', streak: { id: 0, n: 0 }, ign: null, timer: 0, raf: 0, sure: false };
 function dayKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function ciData() {
   const d = dayKey();
@@ -920,15 +925,43 @@ function ciOpen() {
   if (!running) { toast('Start kameraet først'); return; }
   if (!worker) { toast('Skilte kan ikke læses i denne browser'); return; }
   ciData();
-  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false;
+  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = '';
   active = null; motAbove = 0;
   $('ci').hidden = false; ciRender(); ciDraw();
+  ciCamOp(ciToFront);
 }
 function ciClose() {
   ci.open = false; clearTimeout(ci.timer); cancelAnimationFrame(ci.raf);
   $('ci').hidden = true; $('ciPin').innerHTML = '';
   prevMot = null; active = null; motAbove = 0; // start springgenkendelsen roligt igen
   syncCiBtn();
+  ciCamOp(ciToBack);
+}
+// Under indtjekningen bruges frontkameraet, så gymnasten kan se navneknapperne, mens hun holder skiltet op.
+// S.facing ændres ikke: ved Luk skiftes tilbage til det kamera, der var valgt.
+const ciCamOp = (fn) => (ci.camOp = ci.camOp.then(fn).catch((e) => console.warn('kameraskift', e)));
+async function ciToFront() {
+  if (!ci.open || ci.front || !running || !stream || S.facing === 'user') return;
+  if (hold.on) { ci.note = 'Holdomgang optager, så kameraet skiftes ikke. Stop holdomgang for at bruge frontkameraet.'; ciRender(); return; }
+  let ns;
+  try { ns = await camGet('user', true); } catch { toast('Frontkameraet kunne ikke startes. Bruger det nuværende kamera.'); return; }
+  if (!ci.open || hold.on) { ns.getTracks().forEach((t) => t.stop()); return; } // lukket imens
+  // et spring, der stadig læser nummer, afgøres nu, så frontkameraet ikke stemmer med
+  springs.filter((x) => x.state === 'reading').forEach(finishSpring);
+  ci.front = true;
+  try { await camUse(ns); } catch { ci.front = false; toast('Kunne ikke skifte kamera'); return; }
+  ciRender();
+}
+async function ciToBack() {
+  if (!ci.front) return;
+  let ns = null;
+  try { ns = await camGet(S.facing, true); } catch { try { ns = await camGet(S.facing); } catch {} }
+  if (ns) { try { await camUse(ns); } catch { ns = null; } }
+  if (!ns) toast('Kunne ikke skifte tilbage til kameraet. Tryk "Skift kamera".');
+  ci.front = false;
+  // bufferen får et hul (ingen frontbilleder). Springgenkendelsen venter, til kameraet kører stabilt igen.
+  prevMot = null; active = null; motAbove = 0; laneT = new WeakMap();
+  camCalmUntil = now() + 3;
 }
 function ciDraw() {
   if (!ci.open) return;
@@ -937,7 +970,10 @@ function ciDraw() {
   if (cam.readyState < 2 || !cam.videoWidth) return;
   const w = 480, h = Math.round((w * cam.videoHeight) / cam.videoWidth);
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-  c.getContext('2d').drawImage(cam, 0, 0, w, h);
+  const x = c.getContext('2d');
+  // frontkameraet vises som et spejl; skiltet læses stadig fra det ikke-spejlede billede
+  if (ci.front) { x.save(); x.translate(w, 0); x.scale(-1, 1); x.drawImage(cam, 0, 0, w, h); x.restore(); }
+  else x.drawImage(cam, 0, 0, w, h);
 }
 function syncCiBtn() {
   const n = ciActive() ? Object.keys(ciData().map).length : 0;
@@ -969,6 +1005,7 @@ function ciRender() {
   } else if (ci.state === 'pin') {
     msg.innerHTML = '';
   }
+  if (ci.note && ci.state === 'scan') msg.innerHTML += `<small>${esc(ci.note)}</small>`;
   msg.className = 'ciMsg' + (ci.state === 'done' ? ' ok' : ci.state === 'locked' ? ' bad' : '');
   names.querySelectorAll('[data-cig]').forEach((b) => (b.onclick = () => ciPick(+b.dataset.cig)));
   if ($('ciCancel')) $('ciCancel').onclick = () => { ci.state = 'scan'; ciRender(); };
@@ -1929,5 +1966,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { ci: { open: ciOpen, close: ciClose, state: () => ci, data: ciData, assign: ciAssign, seen: ciSeen, pick: ciPick, read: ciOnRead, tagToG }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { ci: { cam: () => ci.camOp, calm: () => camCalmUntil - now(), open: ciOpen, close: ciClose, state: () => ci, data: ciData, assign: ciAssign, seen: ciSeen, pick: ciPick, read: ciOnRead, tagToG }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
