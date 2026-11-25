@@ -925,6 +925,53 @@ async function thumbOf(blob) {
   return c.toDataURL('image/jpeg', 0.7);
 }
 
+// ---------- Cache af klip (links og filer i hukommelsen) ----------
+// Links: klip-id → { url, exp }. Et link genbruges, så længe der er mere end 5 min tilbage (så browserens egen cache rammer).
+const urlCache = new Map(), URL_MARGIN = 5 * 60 * 1000;
+function urlExp(u) {
+  try { const p = JSON.parse(atob(new URL(u).searchParams.get('token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); if (p.exp) return p.exp * 1000; } catch {}
+  return Date.now() + 30 * 60 * 1000;
+}
+function urlGet(id) { const e = urlCache.get(id); return e && e.exp - Date.now() > URL_MARGIN ? e.url : null; }
+function urlPut(id, url, exp) {
+  if (!id || !url) return url;
+  const old = urlGet(id); if (old) return old; // behold det gamle link, så browserens cache rammer
+  urlCache.set(id, { url, exp: exp || urlExp(url) });
+  return url;
+}
+// Filer: fjern-klip hentes én gang som Blob → objectURL, så spoling sker lokalt. Loft ca. 60 MB, ældste ud først.
+const blobC = new Map(), blobPend = new Map(), BLOB_MAX = 60 * 1024 * 1024;
+function blobInUse(id) { return (cmp.a?.id === id || cmp.b?.id === id) || (!$('player').hidden && plClip?.id === id); }
+function blobEvict(keep) {
+  let tot = 0; blobC.forEach((e) => (tot += e.size));
+  for (const [id, e] of blobC) {
+    if (tot <= BLOB_MAX) break;
+    if (id === keep || blobInUse(id)) continue;
+    URL.revokeObjectURL(e.obj); blobC.delete(id); tot -= e.size;
+  }
+}
+async function remoteBlobUrl(c) {
+  if (!c.url) return null;
+  const hit = blobC.get(c.id);
+  if (hit) { blobC.delete(c.id); blobC.set(c.id, hit); return hit.obj; }
+  if (!blobPend.has(c.id)) {
+    blobPend.set(c.id, (async () => {
+      try {
+        const r = await fetch(c.url);
+        if (!r.ok) throw 0;
+        const blob = await r.blob();
+        if (blob.size < 1000) throw 0;
+        const e = { blob, obj: URL.createObjectURL(blob), size: blob.size };
+        blobC.set(c.id, e); blobEvict(c.id);
+        return e.obj;
+      } catch { return null; }
+      finally { blobPend.delete(c.id); }
+    })());
+  }
+  return (await blobPend.get(c.id)) || c.url; // fejler hentning, brug linket direkte
+}
+let clipPool = []; // klippene i den liste, afspilleren er åbnet fra (til "Sammenlign med forrige")
+
 // ---------- Afspiller ----------
 const plV = $('plVideo'), plC = $('plCanvas');
 let plUrl = null, plTimer = null, plRate = 1, plClip = null;
@@ -933,12 +980,14 @@ async function openClip(id) {
   if (!c) return;
   plClip = c; plRate = 1; $('plSlow').textContent = 'Slowmotion';
   $('plTitle').textContent = `${gName(c.g)} · ${fmtTime(c.at)}`;
-  $('player').hidden = false;
+  $('player').hidden = false; plV.dataset.blob = '';
+  $('plPrev').hidden = !(c.g > 0 && (c.blob || c.url));
   if (plUrl) { URL.revokeObjectURL(plUrl); plUrl = null; }
   if (c.url) {
     plC.hidden = true; plV.hidden = false; plUrl = null;
     plV.src = c.url; plV.playbackRate = 1; plV.play().catch(() => {});
     $('plSave').hidden = true;
+    remoteBlobUrl(c); // hent i baggrunden, så slowmotion kan spole lokalt
   } else if (c.blob) {
     plC.hidden = true; plV.hidden = false;
     plUrl = URL.createObjectURL(c.blob);
@@ -969,9 +1018,31 @@ async function playFrames(fr) {
   tick();
 }
 $('plClose').onclick = () => { $('player').hidden = true; plV.pause(); clearTimeout(plTimer); };
+async function plSwap() { // skift fra link til lokal fil, så spoling er glat
+  const c = plClip;
+  if (!c?.url || plV.dataset.blob === c.id) return;
+  const u = await remoteBlobUrl(c);
+  if (!u || u === c.url || plClip !== c || plV.dataset.blob === c.id) return;
+  const t = plV.currentTime, pa = plV.paused;
+  plV.dataset.blob = c.id; plV.src = u;
+  plV.addEventListener('loadedmetadata', () => { plV.currentTime = t; plV.playbackRate = plRate; if (!pa) plV.play().catch(() => {}); }, { once: true });
+}
+function prevClip(c) {
+  const same = clipPool.filter((x) => x.id !== c.id && x.g === c.g && x.at < c.at).sort((a, b) => b.at - a.at);
+  return same.find((x) => (x.d || '') === (c.d || '')) || same[0] || null;
+}
+$('plPrev').onclick = async () => {
+  const c = plClip, p = c && c.g > 0 ? prevClip(c) : null;
+  if (!p) { toast('Ingen tidligere spring fra samme gymnast'); return; }
+  const full = p.url || p.blob ? p : await getAny(p.id);
+  if (!full || !(full.url || full.blob)) { toast('Det forrige klip kan ikke sammenlignes'); return; }
+  $('player').hidden = true; plV.pause(); clearTimeout(plTimer);
+  openCompare(full, c);
+};
 $('plSlow').onclick = () => {
   plRate = plRate === 1 ? 0.4 : 1;
   $('plSlow').textContent = plRate === 1 ? 'Slowmotion' : 'Normal fart';
+  if (plRate !== 1) plSwap();
   if (plClip?.blob || plClip?.url) plV.playbackRate = plRate; else playFrames(plClip.frames);
 };
 $('plReplay').onclick = () => {
@@ -980,9 +1051,9 @@ $('plReplay').onclick = () => {
 
 // ---------- Holdomgang ----------
 // Et langt klip fra man trykker, til man trykker igen (spring i strøm). Det gives til hele holdet, så alle gymnaster kan se det.
-// Optages direkte fra kameraet med enhedens videochip. Deles i stykker á 60 s, så hver fil kan sendes op (grænse 25 MB).
-const HOLD_PART = 60;
-const hold = { on: false, rec: null, id0: 0, t0: 0, no: 0, cut: 0, timer: 0, mime: '', thumb: '' };
+// Optages med enhedens videochip i højst 720p og ca. 1,2 Mbit/s. Deles i stykker á 90 s, så hver fil kan sendes op (grænse 25 MB).
+const HOLD_PART = 90, HOLD_BPS = 1_200_000, HOLD_LONG = 1280, HOLD_SHORT = 720; // 90 s × 1,2 Mbit/s ≈ 14 MB pr. fil
+const hold = { out: null, cv: null, raf: 0, vfc: 0, iv: 0, on: false, rec: null, id0: 0, t0: 0, no: 0, cut: 0, timer: 0, mime: '', thumb: '' };
 function camThumb() {
   const c = document.createElement('canvas'); c.width = 320; c.height = 180;
   const vw = cam.videoWidth || 16, vh = cam.videoHeight || 9, r = Math.max(320 / vw, 180 / vh);
@@ -990,13 +1061,39 @@ function camThumb() {
   return c.toDataURL('image/jpeg', 0.7);
 }
 function holdStream() {
-  if (stream && stream.active) return stream;
-  try { return cam.captureStream ? cam.captureStream() : cam.mozCaptureStream ? cam.mozCaptureStream() : null; } catch { return null; }
+  let st = null;
+  if (stream && stream.active) st = stream;
+  else { try { st = cam.captureStream ? cam.captureStream() : cam.mozCaptureStream ? cam.mozCaptureStream() : null; } catch { st = null; } }
+  if (!st) return null;
+  // Er billedet allerede højst ca. 720p, optages kameraet direkte (billigst). Ellers skaleres via et lærred.
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if (!vw || !vh || (Math.max(vw, vh) <= HOLD_LONG && Math.min(vw, vh) <= HOLD_SHORT)) return st;
+  const k = Math.min(HOLD_LONG / Math.max(vw, vh), HOLD_SHORT / Math.min(vw, vh));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round((vw * k) / 2) * 2; cv.height = Math.round((vh * k) / 2) * 2;
+  let x, out;
+  try { x = cv.getContext('2d', { alpha: false }); out = cv.captureStream(30); } catch { return st; }
+  if (!out || !out.getVideoTracks().length) return st;
+  const draw = () => { try { x.drawImage(cam, 0, 0, cv.width, cv.height); } catch {} };
+  draw();
+  hold.cv = cv;
+  if (cam.requestVideoFrameCallback) { const loop = () => { draw(); hold.vfc = cam.requestVideoFrameCallback(loop); }; hold.vfc = cam.requestVideoFrameCallback(loop); }
+  else hold.iv = setInterval(draw, 33);
+  return out;
+}
+function holdFree() {
+  if (hold.vfc && cam.cancelVideoFrameCallback) try { cam.cancelVideoFrameCallback(hold.vfc); } catch {}
+  clearInterval(hold.iv); hold.vfc = 0; hold.iv = 0;
+  if (hold.cv) { hold.cv = null; if (hold.out) hold.out.getTracks().forEach((t) => t.stop()); }
+  hold.out = null;
 }
 function holdStart() {
-  const st = holdStream(), mime = pickMime();
-  if (!running || !st) { toast('Start kameraet først'); return; }
+  const mime = pickMime();
+  if (!running || !(stream?.active || cam.videoWidth)) { toast('Start kameraet først'); return; }
   if (!mime) { toast('Holdomgang kan ikke optages i denne browser'); return; }
+  const st = holdStream();
+  if (!st) { toast('Start kameraet først'); return; }
+  hold.out = hold.cv ? st : null;
   hold.on = true; hold.id0 = Date.now(); hold.t0 = Date.now(); hold.no = 0; hold.mime = mime; hold.thumb = camThumb();
   holdPart(st);
   clearInterval(hold.timer); hold.timer = setInterval(holdUI, 1000); holdUI();
@@ -1005,8 +1102,8 @@ function holdStart() {
 function holdPart(st) {
   const no = ++hold.no, at = Date.now(), parts = [];
   let rec;
-  try { rec = new MediaRecorder(st, { mimeType: hold.mime, videoBitsPerSecond: 2_500_000 }); }
-  catch (e) { hold.on = false; holdUI(); toast('Holdomgang kunne ikke startes'); return; }
+  try { rec = new MediaRecorder(st, { mimeType: hold.mime, videoBitsPerSecond: HOLD_BPS }); }
+  catch (e) { hold.on = false; holdFree(); holdUI(); toast('Holdomgang kunne ikke startes'); return; }
   rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
   rec.onstop = () => holdSave(no, at, Date.now(), parts, no === 1 ? hold.thumb : camThumb());
   rec.start(1000);
@@ -1019,6 +1116,7 @@ function holdStop() {
   hold.on = false; clearTimeout(hold.cut); clearInterval(hold.timer);
   try { if (hold.rec && hold.rec.state !== 'inactive') hold.rec.stop(); } catch {}
   hold.rec = null; holdUI();
+  setTimeout(() => { if (!hold.on) holdFree(); }, 500); // lad sidste stykke blive afsluttet
 }
 async function holdSave(no, at, end, parts, thumb) {
   const blob = new Blob(parts, { type: hold.mime.split(';')[0] });
@@ -1050,14 +1148,17 @@ function pickForCompare(c, btn, rerender) {
   if (cmpPick.length === 2) { const [a, b] = cmpPick; cmpPick = null; rerender(); openCompare(a, b); }
   else toast('Vælg ét klip mere');
 }
-function cmpSrc(c) { if (c.url) return c.url; const u = URL.createObjectURL(c.blob); cmp.urls.push(u); return u; }
+async function cmpSrc(c) { if (c.url) return remoteBlobUrl(c); const u = URL.createObjectURL(c.blob); cmp.urls.push(u); return u; }
 function cmpLabel(c) { return `${c.g ? gName(c.g) : 'Ukendt'} · ${fmtTime(c.at)}`; }
 async function openCompare(a, b) {
   cmp.a = a; cmp.b = b; cmp.off = 0; cmp.rate = 1;
   $('cmpAt').textContent = cmpLabel(a); $('cmpBt').textContent = cmpLabel(b);
   $('cmpSlow').textContent = 'Slowmotion';
   $('cmpBox').classList.toggle('stack', innerHeight > innerWidth);
-  cA.src = cmpSrc(a); cB.src = cmpSrc(b);
+  if (a.url || b.url) toast('Henter klip …');
+  const [sa, sb2] = await Promise.all([cmpSrc(a), cmpSrc(b)]);
+  if (cmp.a !== a || cmp.b !== b) return;
+  cA.src = sa; cB.src = sb2;
   $('cmp').hidden = false;
   await Promise.all([cA, cB].map((v) => (v.readyState >= 1 ? 0 : new Promise((r) => { v.onloadedmetadata = r; v.onerror = r; }))));
   cmpRange(); cmpSeek(cmp.t0); cmpPlay(true);
@@ -1107,7 +1208,7 @@ $('cmpOffM').onclick = () => cmpShift(-0.1);
 $('cmpOffP').onclick = () => cmpShift(0.1);
 $('cmpLayout').onclick = () => $('cmpBox').classList.toggle('stack');
 $('cmpClose').onclick = () => {
-  cmpPlay(false); $('cmp').hidden = true;
+  cmpPlay(false); $('cmp').hidden = true; cmp.a = cmp.b = null;
   cA.removeAttribute('src'); cB.removeAttribute('src'); cA.load(); cB.load();
   cmp.urls.forEach((u) => URL.revokeObjectURL(u)); cmp.urls = [];
 };
@@ -1201,8 +1302,10 @@ async function getAny(id) {
   if (c) return c;
   const m = remoteCache.get(id);
   if (!m || !sb) return null;
+  const hit = urlGet(id);
+  if (hit) return { ...m, url: hit };
   const { data } = await sb.storage.from('clips').createSignedUrl(m.path, 3600);
-  return { ...m, url: data?.signedUrl || null };
+  return { ...m, url: data?.signedUrl ? urlPut(id, data.signedUrl, Date.now() + 3600 * 1000) : null };
 }
 async function delAny(id) {
   const c = await getClip(id);
@@ -1216,7 +1319,7 @@ async function renderClips() {
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
   w.innerHTML = w.innerHTML || '<p class="muted">Henter klip …</p>';
-  const list = await allClips();
+  const list = await allClips(); clipPool = list;
   const onlyUnk = w.dataset.unk === '1';
   const shown = onlyUnk ? list.filter((c) => !c.g) : list;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${sel === TEAM ? ' selected' : ''}>Holdet (alle kan se)</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
@@ -1288,7 +1391,7 @@ async function renderAssign(skip) {
       ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b>${g.name ? `<span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span>` : ''}</button>`).join('')}
     </div>
     <div class="row" style="margin-top:12px"><button id="asSkip">Spring over</button><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
-  if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else v.src = c.url; v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
+  if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else { v.src = c.url; remoteBlobUrl(c).then((u) => { if (u && u !== c.url && $('asV') === v) { const t = v.currentTime, r = v.playbackRate; v.src = u; v.addEventListener('loadedmetadata', () => { v.currentTime = t; v.playbackRate = r; v.play().catch(() => {}); }, { once: true }); } }); } v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
   else $('asSlow').hidden = true;
   w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { await setClipG(c.id, +b.dataset.as); toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
   $('asSkip').onclick = () => renderAssign(skip + 1);
@@ -1334,7 +1437,8 @@ async function renderMine() {
     };
     return;
   }
-  const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at) })) : (await listClips()).filter((c) => c.g === mineG || c.g === TEAM);
+  const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at), url: urlPut(c.id, c.url) })) : (await listClips()).filter((c) => c.g === mineG || c.g === TEAM);
+  clipPool = list.map((c) => ({ ...c, g: c.g ?? mineG }));
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
@@ -1490,7 +1594,7 @@ async function cloudUpload(c) {
   if (!cloudTrainer || !c.blob || c.cloud) return false;
   const ext = c.blob.type.includes('mp4') ? 'mp4' : 'webm';
   const path = `${c.id}.${ext}`;
-  const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true });
+  const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true, cacheControl: '31536000' });
   if (up.error) return false;
   const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null });
   if (ins.error) return false;
@@ -1773,5 +1877,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { openClip, prevClip, setPool: (p) => { clipPool = p; }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
