@@ -1569,7 +1569,7 @@ async function renderAssign(skip) {
   const unk = (await allClips()).filter((c) => !c.g).reverse(); // ældste først
   if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; }
   if (!unk.length || skip >= unk.length) {
-    w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer. 👏'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
+    w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer.'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
     $('asBack').onclick = renderClips; return;
   }
   const c = await getAny(unk[skip].id);
@@ -1636,7 +1636,7 @@ async function renderMine() {
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
     ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" style="background-image:url('${c.thumb || ''}')" aria-label="Afspil"><span>${c.dur} s</span></button>
-      <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu.</div>'}`;
+      <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu. Dine spring kommer her, når træneren har sat dit nummer på dem.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
   if ($('cmpBtn')) $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; clearTimeout(idleT); renderMine(); };
   w.querySelectorAll('[data-i]').forEach((b) => {
