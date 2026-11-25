@@ -386,6 +386,8 @@ async function camUse(ns) {
   stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null; capLoop();
 }
 $('camSwitch').onclick = async () => {
+  // sidder frontkameraet fast efter indtjekningen, prøves tilbageskiftet igen (S.facing er uændret)
+  if (ci.front && !ci.open) { ciCamOp(ciToBack); return; }
   S.facing = S.facing === 'environment' ? 'user' : 'environment'; save();
   if (!running || !stream) return;
   try {
@@ -949,15 +951,21 @@ async function ciToFront() {
   // et spring, der stadig læser nummer, afgøres nu, så frontkameraet ikke stemmer med
   springs.filter((x) => x.state === 'reading').forEach(finishSpring);
   ci.front = true;
-  try { await camUse(ns); } catch { ci.front = false; toast('Kunne ikke skifte kamera'); return; }
+  try { await camUse(ns); } catch { if (stream !== ns) ci.front = false; toast('Kunne ikke skifte kamera'); return; }
   ciRender();
 }
 async function ciToBack() {
   if (!ci.front) return;
   let ns = null;
   try { ns = await camGet(S.facing, true); } catch { try { ns = await camGet(S.facing); } catch {} }
+  // uden "exact" kan browseren give frontkameraet igen: det tæller som fejl
+  if (ns && S.facing === 'environment' && ns.getVideoTracks()[0]?.getSettings?.().facingMode === 'user') { ns.getTracks().forEach((t) => t.stop()); ns = null; }
   if (ns) { try { await camUse(ns); } catch { ns = null; } }
-  if (!ns) toast('Kunne ikke skifte tilbage til kameraet. Tryk "Skift kamera".');
+  if (!ns || !stream?.active) {
+    // ci.front forbliver sand: intet fra frontkameraet kommer i bufferen, ingen spring og ingen klip
+    toast('Kunne ikke skifte tilbage til kameraet. Tryk "Skift kamera" for at prøve igen.');
+    return;
+  }
   ci.front = false;
   // bufferen får et hul (ingen frontbilleder). Springgenkendelsen venter, til kameraet kører stabilt igen.
   prevMot = null; active = null; motAbove = 0; laneT = new WeakMap();
@@ -1269,7 +1277,7 @@ function holdStream() {
   const draw = () => { try { x.drawImage(cam, 0, 0, cv.width, cv.height); } catch {} };
   draw();
   hold.cv = cv;
-  if (cam.requestVideoFrameCallback) { const loop = () => { draw(); hold.vfc = cam.requestVideoFrameCallback(loop); }; hold.vfc = cam.requestVideoFrameCallback(loop); }
+  if (cam.requestVideoFrameCallback) { const loop = () => { if (hold.cv !== cv) return; draw(); hold.vfc = cam.requestVideoFrameCallback(loop); }; hold.vfc = cam.requestVideoFrameCallback(loop); }
   else hold.iv = setInterval(draw, 33);
   return out;
 }
@@ -1283,6 +1291,8 @@ function holdStart() {
   const mime = pickMime();
   if (!running || !(stream?.active || cam.videoWidth)) { toast('Start kameraet først'); return; }
   if (!mime) { toast('Holdomgang kan ikke optages i denne browser'); return; }
+  if (ci.front) { toast('Frontkameraet er tændt. Tryk "Skift kamera" først.'); return; }
+  holdFree(); // evt. rester fra forrige holdomgang
   const st = holdStream();
   if (!st) { toast('Start kameraet først'); return; }
   hold.out = hold.cv ? st : null;
@@ -1297,7 +1307,8 @@ function holdPart(st) {
   try { rec = new MediaRecorder(st, { mimeType: hold.mime, videoBitsPerSecond: HOLD_BPS }); }
   catch (e) { hold.on = false; holdFree(); holdUI(); toast('Holdomgang kunne ikke startes'); return; }
   rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
-  rec.onstop = () => holdSave(no, at, Date.now(), parts, no === 1 ? hold.thumb : camThumb());
+  const id0 = hold.id0, mime = hold.mime, th1 = hold.thumb; // låses her: onstop kommer først, efter en evt. ny holdomgang er startet
+  rec.onstop = () => holdSave(no, at, Date.now(), parts, no === 1 ? th1 : camThumb(), id0, mime);
   rec.start(1000);
   hold.rec = rec;
   clearTimeout(hold.cut);
@@ -1310,10 +1321,10 @@ function holdStop() {
   hold.rec = null; holdUI();
   setTimeout(() => { if (!hold.on) holdFree(); }, 500); // lad sidste stykke blive afsluttet
 }
-async function holdSave(no, at, end, parts, thumb) {
-  const blob = new Blob(parts, { type: hold.mime.split(';')[0] });
+async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.mime) {
+  const blob = new Blob(parts, { type: mime.split(';')[0] });
   if (blob.size < 1000) return;
-  const c = { id: `${hold.id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
+  const c = { id: `${id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
   await putClip(c); refreshLists(); setRec();
   toast(no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
   cloudUpload(c);
@@ -1475,7 +1486,9 @@ let remoteCache = new Map();
 async function allClips() {
   const local = await listClips();
   if (!cloudTrainer) return local;
-  const { data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d, tag').order('at', { ascending: false }).limit(500);
+  let { data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d, tag').order('at', { ascending: false }).limit(500);
+  // mangler kolonnen tag i skyen (ikke migreret endnu), hentes som før uden
+  if (error) ({ data, error } = await sb.from('clips').select('id, g, at, dur, path, thumb, d').order('at', { ascending: false }).limit(500));
   if (error) return local;
   remoteCache = new Map();
   const byId = new Map(local.map((c) => [c.id, c]));
@@ -1789,7 +1802,9 @@ async function cloudUpload(c) {
   const path = `${c.id}.${ext}`;
   const up = await sb.storage.from('clips').upload(path, c.blob, { contentType: c.blob.type, upsert: true, cacheControl: '31536000' });
   if (up.error) return false;
-  const ins = await sb.from('clips').upsert({ id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null, tag: c.tag ?? null });
+  const row = { id: c.id, g: c.g || 0, at: new Date(c.at).toISOString(), dur: c.dur, path, thumb: c.thumb, d: c.d || null };
+  let ins = await sb.from('clips').upsert({ ...row, tag: c.tag ?? null });
+  if (ins.error) ins = await sb.from('clips').upsert(row); // skyen kender (endnu) ikke kolonnen tag
   if (ins.error) return false;
   const fresh = await getClip(c.id);
   if (fresh) { fresh.cloud = true; fresh.path = path; await putClip(fresh); }

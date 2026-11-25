@@ -248,6 +248,8 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
   #scrubTxt{min-width:64px;font-size:var(--fs-m)}
   .bar>.grp:nth-of-type(2){flex:1 1 100%}
   .bar>.grp:nth-of-type(2)>*{flex:1 1 0}
+  /* fire knapper (Klip, Holdomgang, Indtjekning, opstilling) er for meget til én linje: 2 × 2 */
+  .bar>.grp:nth-of-type(2){display:grid;grid-template-columns:1fr 1fr}
   #presetSel{min-width:0}
   #layoutSeg{flex:none}
   .bar>.grp:nth-of-type(4){margin-left:auto}
@@ -279,7 +281,7 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 /* indtjekning */
 .modal.ci{grid-template-rows:auto minmax(0,1fr);background:var(--bg)}
-.ciBody{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;padding:0 12px 12px;min-height:0}
+.ciBody{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s3);padding:var(--s3);min-height:0}
 .ciMain{overflow:auto;display:grid;align-content:start;gap:14px;min-height:0}
 .modal #ciCam{width:auto;height:auto;max-width:100%;max-height:32vh;justify-self:center;border-radius:12px}
 .ciMsg{font-size:34px;font-weight:800;text-align:center;line-height:1.2}
