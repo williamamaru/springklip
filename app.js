@@ -779,7 +779,7 @@ function newSpring(start, end, opt = {}) {
 
 // ---------- Nummerskilte ----------
 let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring';
-try { worker = new Worker('worker.js?v=20261125234230'); } catch { worker = null; }
+try { worker = new Worker('worker.js?v=20261126000732'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onmessage = (e) => {
   tagBusy = false;
@@ -2101,7 +2101,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261125234230';
+const APP_VERSION = '20261126000732';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
