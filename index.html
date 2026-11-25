@@ -223,6 +223,16 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 .modal video,.modal canvas{width:100%;height:100%;object-fit:contain;background:var(--stage);display:block}
 .plbox{min-height:0;position:relative}
 #plSave{text-decoration:none}
+/* tegning i afspilleren (kun træner): canvas ligger præcis over det viste billede */
+#player{grid-template-rows:auto minmax(0,1fr) auto auto}
+.modal #plDraw{position:absolute;left:0;top:0;width:0;height:0;background:transparent;object-fit:fill;touch-action:none;pointer-events:none;z-index:2}
+.modal #plDraw.on{pointer-events:auto;cursor:crosshair}
+#plTools .grow{flex:1}
+#plTools .seg{display:flex}
+#plColors button{width:var(--hit);padding:0}
+#plColors button i{width:20px;height:20px;border-radius:50%;border:2px solid #000;box-shadow:0 0 0 1px var(--line-2)}
+#plColors button.on{background:var(--raise-2);border-color:var(--ink)}
+@media (max-width:700px){#plTools .grow{display:none}#plTools .seg[data-tools]{flex:1 1 100%}#plTools .seg[data-tools] button{flex:1 1 0;padding:0 var(--s2)}}
 #cmpScrub{flex:1;min-width:160px}
 #cmpOff{min-width:64px;text-align:center;font-size:var(--fs-l);font-variant-numeric:tabular-nums}
 .cmpbox{display:grid;grid-template-columns:1fr 1fr;gap:2px;min-height:0;background:var(--line)}
@@ -391,12 +401,27 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 
 <div class="modal" id="player" hidden>
   <div class="top"><b id="plTitle">Spring</b><button id="plClose">Luk</button></div>
-  <div class="plbox"><video id="plVideo" playsinline controls muted></video><canvas id="plCanvas" hidden></canvas></div>
+  <div class="plbox"><video id="plVideo" playsinline controls muted></video><canvas id="plCanvas" hidden></canvas><canvas id="plDraw" hidden></canvas></div>
   <div class="ctl">
     <button id="plSlow">Slowmotion</button>
     <button id="plReplay">Afspil igen</button>
     <button id="plPrev" hidden>Sammenlign med forrige</button>
     <a id="plSave" download hidden><button>Gem video</button></a>
+    <button id="plDrawBtn" aria-pressed="false" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 7l3 3"/></svg>Tegn</button>
+  </div>
+  <div class="ctl" id="plTools" hidden>
+    <div class="seg" data-tools role="group" aria-label="Værktøj">
+      <button data-tool="line" class="on">Linje</button><button data-tool="arrow">Pil</button><button data-tool="angle">Vinkel</button><button data-tool="free">Frihånd</button>
+    </div>
+    <div class="seg" id="plColors" role="group" aria-label="Farve">
+      <button data-col="#ffd60a" class="on" aria-label="Gul"><i style="background:#ffd60a"></i></button><button data-col="#ffffff" aria-label="Hvid"><i style="background:#fff"></i></button><button data-col="#2ee6ff" aria-label="Turkis"><i style="background:#2ee6ff"></i></button>
+    </div>
+    <div class="seg" id="plStep" role="group" aria-label="Billede for billede">
+      <button id="plBack" aria-label="Et billede tilbage"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><button id="plFwd" aria-label="Et billede frem"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+    </div>
+    <span class="grow"></span>
+    <button id="plUndo"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>Fortryd</button>
+    <button id="plClear" class="ghost bad">Ryd</button>
   </div>
 </div>
 

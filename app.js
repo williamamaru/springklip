@@ -1180,9 +1180,10 @@ let clipPool = []; // klippene i den liste, afspilleren er åbnet fra (til "Samm
 // ---------- Afspiller ----------
 const plV = $('plVideo'), plC = $('plCanvas');
 let plUrl = null, plTimer = null, plRate = 1, plClip = null;
-async function openClip(id) {
+async function openClip(id, o = {}) {
   const c = typeof id === 'object' ? id : await getClip(id);
   if (!c) return;
+  drawReset(!!o.coach && trainerOk && !document.body.classList.contains('gymnast'));
   plClip = c; plRate = 1; $('plSlow').textContent = 'Slowmotion';
   $('plTitle').textContent = `${gName(c.g)} · ${fmtTime(c.at)}`;
   $('player').hidden = false; plV.dataset.blob = '';
@@ -1222,7 +1223,7 @@ async function playFrames(fr) {
   };
   tick();
 }
-$('plClose').onclick = () => { $('player').hidden = true; plV.pause(); clearTimeout(plTimer); };
+$('plClose').onclick = () => { $('player').hidden = true; plV.pause(); clearTimeout(plTimer); drawReset(false); };
 async function plSwap() { // skift fra link til lokal fil, så spoling er glat
   const c = plClip;
   if (!c?.url || plV.dataset.blob === c.id) return;
@@ -1241,7 +1242,7 @@ $('plPrev').onclick = async () => {
   if (!p) { toast('Ingen tidligere spring fra samme gymnast'); return; }
   const full = p.url || p.blob ? p : await getAny(p.id);
   if (!full || !(full.url || full.blob)) { toast('Det forrige klip kan ikke sammenlignes'); return; }
-  $('player').hidden = true; plV.pause(); clearTimeout(plTimer);
+  $('player').hidden = true; plV.pause(); clearTimeout(plTimer); drawReset(false);
   openCompare(full, c);
 };
 $('plSlow').onclick = () => {
@@ -1253,6 +1254,203 @@ $('plSlow').onclick = () => {
 $('plReplay').onclick = () => {
   if (plClip?.blob || plClip?.url) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
 };
+
+// ---------- Tegn i afspilleren (kun træner) ----------
+// Linjer, pile, vinkler og frihånd oven på det viste billede. Punkter gemmes normaliseret (0..1) til videobilledet,
+// så tegningen bliver siddende ved rotation og ændret størrelse. Midlertidig: slettes, når klippet lukkes eller et andet åbnes.
+const dw = { cv: $('plDraw'), on: false, coach: false, tool: 'line', col: '#ffd60a', shapes: [], hist: [], cur: null, drag: null, pid: null, raf: 0, r: { x: 0, y: 0, w: 0, h: 0, sw: 1, sh: 1 } };
+const DW_HIT = 26; // radius i px for at gribe et punkt (≥ 44 px berøringsfelt)
+function dwSrc() { // det viste billede: video eller (gamle klip) billedrækken
+  return plV.hidden ? { el: plC, w: plC.width, h: plC.height } : { el: plV, w: plV.videoWidth, h: plV.videoHeight };
+}
+function dwLayout() {
+  const box = dw.cv.parentElement, s = dwSrc();
+  const bw = box.clientWidth, bh = box.clientHeight;
+  if (!bw || !bh) return;
+  const sw = s.w || 16, sh = s.h || 9, k = Math.min(bw / sw, bh / sh); // object-fit: contain
+  const w = sw * k, h = sh * k, x = (bw - w) / 2, y = (bh - h) / 2;
+  dw.r = { x, y, w, h, sw, sh };
+  const st = dw.cv.style;
+  st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  const W = Math.round(w * dpr), H = Math.round(h * dpr);
+  if (dw.cv.width !== W || dw.cv.height !== H) { dw.cv.width = W; dw.cv.height = H; }
+  dwDraw();
+}
+new ResizeObserver(() => { if (!dw.cv.hidden) dwLayout(); }).observe(dw.cv.parentElement);
+['loadedmetadata', 'resize'].forEach((e) => plV.addEventListener(e, () => { if (!dw.cv.hidden) dwLayout(); }));
+function dwVis() { dw.cv.hidden = !(dw.on || dw.shapes.length); if (!dw.cv.hidden) dwLayout(); }
+function drawReset(coach) {
+  dw.coach = coach; dw.shapes = []; dw.hist = []; dw.cur = null; dw.drag = null; dw.pid = null;
+  $('plDrawBtn').hidden = !coach;
+  dwSet(false);
+}
+function dwSet(on) {
+  dw.on = on && dw.coach;
+  const b = $('plDrawBtn'); b.setAttribute('aria-pressed', dw.on); b.classList.toggle('on', dw.on);
+  $('plTools').hidden = !dw.on;
+  dw.cv.classList.toggle('on', dw.on);
+  if (dw.on) { plV.pause(); clearTimeout(plTimer); plV.controls = false; $('plStep').hidden = plV.hidden; }
+  else { plV.controls = true; if (dw.cur && dw.cur.t === 'angle' && dw.cur.p.length < 3) dwDropCur(); }
+  dwVis();
+}
+$('plDrawBtn').onclick = () => dwSet(!dw.on);
+$('plTools').querySelectorAll('[data-tool]').forEach((b) => (b.onclick = () => {
+  if (dw.cur) dwDropCur();
+  dw.tool = b.dataset.tool;
+  $('plTools').querySelectorAll('[data-tool]').forEach((x) => x.classList.toggle('on', x === b));
+}));
+$('plColors').querySelectorAll('[data-col]').forEach((b) => (b.onclick = () => {
+  dw.col = b.dataset.col;
+  $('plColors').querySelectorAll('[data-col]').forEach((x) => x.classList.toggle('on', x === b));
+}));
+function plStepBy(d) { // ét billede frem/tilbage (ca. 30 billeder/s)
+  if (plV.hidden) return;
+  plV.pause(); plSwap();
+  plV.currentTime = Math.max(0, Math.min((plV.duration || 1e9) - 0.001, plV.currentTime + d / 30));
+}
+$('plBack').onclick = () => plStepBy(-1);
+$('plFwd').onclick = () => plStepBy(1);
+function dwSnap() { dw.hist.push(JSON.stringify(dw.shapes)); if (dw.hist.length > 60) dw.hist.shift(); }
+function dwDropCur() { // en halvfærdig vinkel smides væk (den blev aldrig gemt i historikken)
+  const i = dw.shapes.indexOf(dw.cur); if (i >= 0) dw.shapes.splice(i, 1);
+  dw.hist.pop(); dw.cur = null; dwVis();
+}
+$('plUndo').onclick = () => {
+  dw.cur = null; dw.drag = null;
+  if (dw.hist.length) dw.shapes = JSON.parse(dw.hist.pop());
+  dwVis(); dwDraw();
+};
+$('plClear').onclick = () => { if (!dw.shapes.length) return; dwSnap(); dw.shapes = []; dw.cur = null; dw.drag = null; dwVis(); };
+// koordinater: normaliseret (0..1) <-> css-px i canvas <-> billedpixels (til vinkler, så formatet ikke forvrænger)
+const dwPt = (e) => { const b = dw.cv.getBoundingClientRect(); return [Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)), Math.max(0, Math.min(1, (e.clientY - b.top) / b.height))]; };
+const dwPx = (p) => [p[0] * dw.r.w, p[1] * dw.r.h];
+const dwIm = (p) => [p[0] * dw.r.sw, p[1] * dw.r.sh];
+function dwAngle(a, b, c) { // vinkel ved b i hele grader
+  const A = dwIm(a), B = dwIm(b), C = dwIm(c);
+  const u = [A[0] - B[0], A[1] - B[1]], v = [C[0] - B[0], C[1] - B[1]];
+  const d = Math.hypot(...u) * Math.hypot(...v);
+  return d ? Math.round((Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / d))) * 180) / Math.PI) : 0;
+}
+function dwTilt(a, b) { // linjens hældning i forhold til vandret, 0..90°
+  const A = dwIm(a), B = dwIm(b);
+  let g = Math.abs((Math.atan2(B[1] - A[1], B[0] - A[0]) * 180) / Math.PI);
+  if (g > 90) g = 180 - g;
+  return Math.round(g);
+}
+function dwHit(p) { // nærmeste flytbare punkt inden for DW_HIT
+  const q = dwPx(p); let best = null, bd = DW_HIT;
+  dw.shapes.forEach((s) => {
+    if (s.t === 'free') return;
+    s.p.forEach((pt, i) => { const r = dwPx(pt), d = Math.hypot(r[0] - q[0], r[1] - q[1]); if (d <= bd) { bd = d; best = { s, i }; } });
+  });
+  return best;
+}
+dw.cv.addEventListener('pointerdown', (e) => {
+  if (!dw.on || dw.pid !== null) return;
+  e.preventDefault();
+  dw.pid = e.pointerId; try { dw.cv.setPointerCapture(e.pointerId); } catch {}
+  const p = dwPt(e);
+  if (dw.cur && dw.cur.t === 'angle') { dw.cur.p.push(p); dw.drag = { s: dw.cur, i: dw.cur.p.length - 1, add: true }; return dwDraw(); }
+  const h = dwHit(p);
+  if (h) { dwSnap(); dw.drag = h; return dwDraw(); }
+  dwSnap();
+  const s = { t: dw.tool, col: dw.col, p: dw.tool === 'free' || dw.tool === 'angle' ? [p] : [p, p.slice()] };
+  dw.shapes.push(s);
+  if (s.t === 'angle') { dw.cur = s; dw.drag = { s, i: 0, add: true }; }
+  else if (s.t === 'free') dw.drag = { s, free: true };
+  else dw.drag = { s, i: 1, fresh: true };
+  dwDraw();
+});
+dw.cv.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== dw.pid || !dw.drag) return;
+  e.preventDefault();
+  const p = dwPt(e), d = dw.drag;
+  if (d.free) {
+    const l = d.s.p[d.s.p.length - 1], a = dwPx(l), b = dwPx(p);
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 3) return;
+    d.s.p.push([l[0] * 0.35 + p[0] * 0.65, l[1] * 0.35 + p[1] * 0.65]); // let udglatning af hånden
+  } else d.s.p[d.i] = p;
+  dwDraw();
+});
+function dwUp(e) {
+  if (e.pointerId !== dw.pid) return;
+  dw.pid = null;
+  const d = dw.drag; dw.drag = null;
+  if (!d) return;
+  if (d.fresh) { const a = dwPx(d.s.p[0]), b = dwPx(d.s.p[1]); if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 8) { dw.shapes.pop(); dw.hist.pop(); } }
+  if (d.free && d.s.p.length < 2) { dw.shapes.pop(); dw.hist.pop(); }
+  if (dw.cur && dw.cur.p.length >= 3) dw.cur = null; // vinklen er færdig
+  dwDraw();
+}
+dw.cv.addEventListener('pointerup', dwUp);
+dw.cv.addEventListener('pointercancel', dwUp);
+function dwDraw() { // samles til ét billede pr. skærmopdatering; tegner kun ved ændringer
+  if (dw.raf) return;
+  dw.raf = requestAnimationFrame(() => { dw.raf = 0; dwPaint(); });
+}
+function dwPaint() {
+  const cv = dw.cv, x = cv.getContext('2d');
+  x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, cv.width, cv.height);
+  if (cv.hidden || !dw.r.w) return;
+  const k = cv.width / dw.r.w; x.setTransform(k, 0, 0, k, 0, 0);
+  const lw = Math.max(3, Math.min(5, dw.r.w / 260)), fs = Math.round(Math.max(22, Math.min(40, dw.r.w / 22)));
+  x.lineCap = 'round'; x.lineJoin = 'round';
+  const stroke = (path, col, w = lw) => { // mørk kant under farven, så stregen ses på både lyst og mørkt
+    x.strokeStyle = 'rgba(0,0,0,.75)'; x.lineWidth = w + 3; path(); x.stroke();
+    x.strokeStyle = col; x.lineWidth = w; path(); x.stroke();
+  };
+  const label = (t, px, py, col, size) => {
+    x.font = `800 ${size}px ${getComputedStyle(document.body).fontFamily}`;
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    const m = x.measureText(t).width / 2 + 4, hh = size / 2 + 2;
+    px = Math.max(m, Math.min(dw.r.w - m, px)); py = Math.max(hh, Math.min(dw.r.h - hh, py));
+    x.lineWidth = Math.max(4, size / 6); x.strokeStyle = 'rgba(0,0,0,.85)'; x.strokeText(t, px, py);
+    x.fillStyle = col; x.fillText(t, px, py);
+  };
+  const seg = (a, b) => () => { x.beginPath(); x.moveTo(...a); x.lineTo(...b); };
+  dw.shapes.forEach((s) => {
+    const P = s.p.map(dwPx);
+    if (s.t === 'free') {
+      stroke(() => {
+        x.beginPath(); x.moveTo(...P[0]);
+        for (let i = 1; i < P.length - 1; i++) x.quadraticCurveTo(P[i][0], P[i][1], (P[i][0] + P[i + 1][0]) / 2, (P[i][1] + P[i + 1][1]) / 2);
+        x.lineTo(...P[P.length - 1]);
+      }, s.col);
+      return;
+    }
+    if (s.t === 'line' || s.t === 'arrow') {
+      const [a, b] = P, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      stroke(seg(a, b), s.col);
+      if (s.t === 'arrow' && L > 1) {
+        const g = Math.atan2(b[1] - a[1], b[0] - a[0]), hl = Math.min(L * 0.45, lw * 6);
+        stroke(() => { x.beginPath(); x.moveTo(b[0] - hl * Math.cos(g - 0.45), b[1] - hl * Math.sin(g - 0.45)); x.lineTo(...b); x.lineTo(b[0] - hl * Math.cos(g + 0.45), b[1] - hl * Math.sin(g + 0.45)); }, s.col);
+      }
+      if (L > 30) { // hældning i forhold til vandret: lille tal ved midten, lidt ved siden af stregen
+        const nx = -(b[1] - a[1]) / L, ny = (b[0] - a[0]) / L, o = fs * 0.7;
+        label(dwTilt(s.p[0], s.p[1]) + '°', (a[0] + b[0]) / 2 + nx * o, (a[1] + b[1]) / 2 + ny * o, s.col, Math.round(fs * 0.62));
+      }
+    }
+    if (s.t === 'angle') {
+      if (P.length >= 2) stroke(seg(P[0], P[1]), s.col);
+      if (P.length >= 3) {
+        const [a, b, c] = P;
+        stroke(seg(b, c), s.col);
+        const g1 = Math.atan2(a[1] - b[1], a[0] - b[0]), g2 = Math.atan2(c[1] - b[1], c[0] - b[0]);
+        let d = g2 - g1; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+        const r = Math.max(14, Math.min(fs * 1.4, Math.hypot(a[0] - b[0], a[1] - b[1]) * 0.45, Math.hypot(c[0] - b[0], c[1] - b[1]) * 0.45));
+        stroke(() => { x.beginPath(); x.arc(b[0], b[1], r, g1, g1 + d, d < 0); }, s.col, lw * 0.8);
+        const gm = g1 + d / 2, lr = r + fs * 0.9; // tallet på vinkelhalveringslinjen, uden for buen
+        label(dwAngle(...s.p) + '°', b[0] + Math.cos(gm) * lr, b[1] + Math.sin(gm) * lr, s.col, fs);
+      }
+    }
+    if (dw.on) P.forEach((p) => { // håndtag: kun mens der tegnes
+      x.beginPath(); x.arc(p[0], p[1], 9, 0, 2 * Math.PI);
+      x.fillStyle = 'rgba(0,0,0,.35)'; x.fill(); x.lineWidth = 3; x.strokeStyle = 'rgba(0,0,0,.8)'; x.stroke();
+      x.lineWidth = 2; x.strokeStyle = s.col; x.stroke();
+    });
+  });
+}
 
 // ---------- Holdomgang ----------
 // Et langt klip fra man trykker, til man trykker igen (spring i strøm). Det gives til hele holdet, så alle gymnaster kan se det.
@@ -1557,7 +1755,7 @@ async function renderClips() {
       const c = await getAny(b.dataset.play);
       if (!c) return;
       if (cmpPick) return pickForCompare(c, b, renderClips);
-      openClip(c);
+      openClip(c, { coach: true });
     };
   });
   w.querySelectorAll('[data-g]').forEach((s) => (s.onchange = async () => {
@@ -2090,5 +2288,5 @@ async function thumb264(ch, upto) {
 }
 
 // til test
-window.__springklip = { ci: { cam: () => ci.camOp, calm: () => camCalmUntil - now(), open: ciOpen, close: ciClose, state: () => ci, data: ciData, assign: ciAssign, seen: ciSeen, pick: ciPick, read: ciOnRead, tagToG }, openClip, prevClip, setPool: (p) => { clipPool = p; }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
+window.__springklip = { draw: { state: () => ({ on: dw.on, coach: dw.coach, tool: dw.tool, shapes: dw.shapes, cur: dw.cur, r: dw.r, hidden: dw.cv.hidden }), angle: dwAngle, tilt: dwTilt }, ci: { cam: () => ci.camOp, calm: () => camCalmUntil - now(), open: ciOpen, close: ciClose, state: () => ci, data: ciData, assign: ciAssign, seen: ciSeen, pick: ciPick, read: ciOnRead, tagToG }, openClip, prevClip, setPool: (p) => { clipPool = p; }, springs: () => springs, getClip, openCompare, holdStart, holdStop, hold, startCamera, newSpring, now, perfText, resetLags, st: () => ({ ENG, ring, vs, H, HP, lags, S, laneT, laneMask, preset: preset() }), listClips, S, log, shown: () => (vs[0].cur ? vs[0].cur.t : null), ringStats: () => { const d = ring.slice(-150).map((f, i, a) => (i ? f.t - a[i - 1].t : 0)).slice(1); const m = d.reduce((x, y) => x + y, 0) / d.length; return { fps: Math.round(10 / m) / 10, max_gap_ms: Math.round(Math.max(...d) * 1000) }; } };
 }
