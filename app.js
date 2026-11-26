@@ -174,6 +174,7 @@ function camGone(st) {
   springs.filter((s) => s.state === 'reading').forEach(finishSpring);
   $('camErr').textContent = 'Kameraet blev afbrudt. Tryk for at starte igen.';
   $('startBox').hidden = false;
+  wake(); // knapperne frem nu, så første tryk rammer Start kamera
 }
 function watchStream(st) { st.getVideoTracks().forEach((t) => t.addEventListener('ended', () => camGone(st))); }
 async function startCamera0(file) {
@@ -1162,7 +1163,8 @@ $('ciLock').onclick = () => {
   // lås op kræver trænerkoden: brug den samme kodeskærm som Klip og Opsætning
   if (!trainerOk) { $('clipsWrap').innerHTML = ''; $('setupWrap').innerHTML = ''; } // undgå to kodefelter med samme id
   clearTimeout(ci.timer); ci.state = 'pin'; ciRender();
-  pinScreen($('ciPin'), 'Lås indtjekningen op', () => { ciData().locked = false; save(); ci.state = 'scan'; ciRender(); toast('Indtjekningen er låst op'); });
+  const wasOk = trainerOk;
+  pinScreen($('ciPin'), 'Lås indtjekningen op', () => { if (!wasOk) { trainerOk = false; trainerPin = null; } ciData().locked = false; save(); ci.state = 'scan'; ciRender(); toast('Indtjekningen er låst op'); });
 };
 $('ciNew').onclick = () => {
   if (ciData().locked) return;
@@ -1361,6 +1363,7 @@ async function openClip(id, o = {}) {
 }
 async function playFrames(fr) {
   clearTimeout(plTimer);
+  if (!fr || !fr.length || !fr[0].blob) { toast('Klippet kunne ikke hentes. Prøv igen om lidt.'); return; }
   const x = plC.getContext('2d');
   const f0 = await createImageBitmap(fr[0].blob); plC.width = f0.width; plC.height = f0.height; f0.close && f0.close();
   let i = 0;
@@ -1836,11 +1839,11 @@ function show(v) {
   if (v !== 'mine') mineG = null;
   if (v !== 'setup') setupPulled = false;
 }
-function dayKey(ms) { const d = new Date(ms); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function dayNum(ms) { const d = new Date(ms); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
 function fmtDay(ms) {
-  const k = dayKey(ms), n = Date.now();
-  if (k === dayKey(n)) return 'I dag';
-  if (k === dayKey(n - 864e5)) return 'I går';
+  const k = dayNum(ms), n = Date.now();
+  if (k === dayNum(n)) return 'I dag';
+  if (k === dayNum(n - 864e5)) return 'I går';
   const d = new Date(ms);
   return d.toLocaleDateString('da-DK', d.getFullYear() === new Date().getFullYear() ? { day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short', year: 'numeric' });
 }
@@ -1848,7 +1851,7 @@ function fmtTime(ms) { return fmtDay(ms) + ' ' + new Date(ms).toLocaleTimeString
 const PLAY_SVG = '<svg class="play" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M10 8l6 4-6 4z"/></svg>';
 // Listen genopbygges ikke, mens brugeren rører, ruller eller har noget åbent: i stedet vises en pille med antal nye klip.
 let lastTouch = 0, clipsIds = new Set();
-['pointerdown', 'pointermove', 'touchstart', 'touchmove', 'wheel', 'scroll'].forEach((e) => document.addEventListener(e, () => { lastTouch = Date.now(); }, { capture: true, passive: true }));
+['pointerdown', 'pointermove', 'touchstart', 'touchmove', 'wheel', 'scroll', 'keydown', 'input'].forEach((e) => document.addEventListener(e, () => { lastTouch = Date.now(); }, { capture: true, passive: true }));
 function listBusy() {
   const v = $('clips');
   return Date.now() - lastTouch < 3000 || v.scrollTop > 8 || !$('player').hidden || !$('cmp').hidden || !!cmpPick
@@ -1856,7 +1859,7 @@ function listBusy() {
 }
 async function clipsNote() {
   const n = (await listClips()).filter((c) => !clipsIds.has(c.id)).length;
-  if (!n || view !== 'clips' || assigning) return;
+  if (!n || view !== 'clips' || assigning || !trainerOk) return;
   let p = $('newPill');
   if (!p) {
     p = document.createElement('button'); p.id = 'newPill'; p.className = 'acc';
@@ -1866,10 +1869,10 @@ async function clipsNote() {
   p.textContent = `${n} ${n === 1 ? 'nyt klip' : 'nye klip'} · tryk for at vise`;
 }
 function refreshLists() {
-  if (view === 'clips' && !assigning) { if (listBusy()) clipsNote(); else renderClips(); }
+  if (view === 'clips' && !assigning && trainerOk) { if (listBusy()) clipsNote(); else renderClips(); }
   if (view === 'mine' && mineG && Date.now() - lastTouch > 3000 && $('player').hidden) renderMine();
 }
-setInterval(() => { if (view === 'clips' && !assigning && $('newPill') && !listBusy()) renderClips(); }, 1500);
+setInterval(() => { if (view === 'clips' && !assigning && trainerOk && $('newPill') && !listBusy()) renderClips(); }, 1500);
 
 // Trænerkode
 // Kodeskærmen kan stå flere steder (Klip, Opsætning, indtjekningen, over Live). Dens elementer findes derfor
@@ -1969,8 +1972,9 @@ function pinCloud(wrap, title, onOk, mode) {
     let ok = false;
     try {
       const r = await sb.auth.signInWithPassword({ email, password });
-      if (r.error) { err.textContent = 'Forkert e-mail eller adgangskode.'; return; }
-      const { data: t } = await sb.from('trainers').select('user_id').eq('user_id', r.data.user.id).maybeSingle();
+      if (r.error) { err.textContent = netMsg(r.error) || 'Forkert e-mail eller adgangskode.'; return; }
+      const { data: t, error: te } = await sb.from('trainers').select('user_id').eq('user_id', r.data.user.id).maybeSingle();
+      if (te) { err.textContent = netMsg(te) || 'Kunne ikke tjekke trænerkontoen. Prøv igen.'; return; }
       ok = !!t;
       if (ok) { cloudUser = r.data.user; cloudTrainer = true; }
     } catch { err.textContent = 'Ingen forbindelse til skyen. Tjek internettet, og prøv igen.'; return; }
@@ -1987,13 +1991,15 @@ function lockTrainer(hard) {
   trainerOk = false; trainerPin = null;
   if (hard) trainerT = 0;
   $('clipsWrap').innerHTML = ''; $('setupWrap').innerHTML = ''; // intet fra panelet ligger tilbage i siden
+  if (was && plCoach && !$('player').hidden) $('plClose').click(); // trænerens afspiller (Tegn, bladre i alle klip) lukkes også
+  if (was && !$('cmp').hidden && view !== 'mine') $('cmpClose').click();
   if (was && (view === 'clips' || view === 'setup')) show(view);
 }
 // Klip fra, Indstil felter og Slet opstilling på Live kræver trænerkoden (hvis der er sat en).
 function trainerGate(fn) {
   if (!S.trainerHash || trainerOk || Date.now() - trainerT < TRAINER_GRACE) { fn(); return; }
   $('gate').hidden = false; document.body.classList.remove('calm');
-  pinScreen($('gateWrap'), 'Kun for trænere', () => { gateClose(); fn(); });
+  pinScreen($('gateWrap'), 'Kun for trænere', () => { trainerOk = false; trainerPin = null; gateClose(); fn(); }); // kun Live-knapperne (trainerT), ikke Klip/Opsætning
 }
 function gateClose() { $('gate').hidden = true; $('gateWrap').innerHTML = ''; wake(); }
 $('gateNo').onclick = gateClose;
@@ -2044,15 +2050,15 @@ async function renderClips() {
   w.innerHTML = w.innerHTML || '<p class="muted">Henter klip …</p>';
   const list = await allClips(); clipPool = list; clipsIds = new Set(list.map((c) => c.id));
   const onlyUnk = w.dataset.unk === '1';
-  const tk = dayKey(Date.now()), yk = dayKey(Date.now() - 864e5);
+  const tk = dayNum(Date.now()), yk = dayNum(Date.now() - 864e5);
   const shown = list.filter((c) => (!onlyUnk || !c.g) && (clipsF.g === 'all' || c.g === +clipsF.g)
-    && (clipsF.day === 'all' || dayKey(c.at) === (clipsF.day === 'today' ? tk : yk)));
+    && (clipsF.day === 'all' || dayNum(c.at) === (clipsF.day === 'today' ? tk : yk)));
   plList = shown;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${sel === TEAM ? ' selected' : ''}>Holdet (alle kan se)</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   const fopts = `<option value="all"${clipsF.g === 'all' ? ' selected' : ''}>Alle gymnaster</option><option value="0"${clipsF.g === '0' ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${clipsF.g === String(TEAM) ? ' selected' : ''}>Holdet</option>`
     + S.roster.map((g) => `<option value="${g.n}"${clipsF.g === String(g.n) ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   const groups = [];
-  for (const c of shown) { const k = dayKey(c.at); const last = groups[groups.length - 1]; if (last && last.k === k) last.l.push(c); else groups.push({ k, at: c.at, l: [c] }); }
+  for (const c of shown) { const k = dayNum(c.at); const last = groups[groups.length - 1]; if (last && last.k === k) last.l.push(c); else groups.push({ k, at: c.at, l: [c] }); }
   const card = (c) => `
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${esc(c.id)}"${thumbCss(c.thumb)} aria-label="Afspil">${PLAY_SVG}<span>${num(c.dur)} s</span></button>
@@ -2198,7 +2204,7 @@ async function renderMine() {
   clipPool = list.map((c) => ({ ...c, g: c.g ?? mineG })); plList = clipPool;
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
-    <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
+    <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det. Vælg 0,25× eller 0,5× for at se detaljerne.</p>
     ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" ${thumbCss(c.thumb)} aria-label="Afspil">${PLAY_SVG}<span>${num(c.dur)} s</span></button>
       <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>${c.g === TEAM || c.team ? '<span class="tag">Holdets klip</span>' : ''}</div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu. Dine spring kommer her, når træneren har sat dit nummer på dem.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
@@ -2302,7 +2308,7 @@ function renderSetup() {
     setTimeout(() => location.reload(), 600);
   };
   $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = dk1(S.sens); e.target.setAttribute('aria-valuetext', dk1(S.sens) + ' procent'); save(); };
-  $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
+  $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); $('keepNote').textContent = S.keepDays; };
   $('wipe').onclick = async (e) => {
     const b = e.target;
     if (!confirm2(b, 'Tryk igen for at slette alle klip')) return;
