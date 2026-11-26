@@ -1858,15 +1858,17 @@ function listBusy() {
     || document.activeElement?.tagName === 'SELECT' || !!v.querySelector('[data-sure]');
 }
 async function clipsNote() {
-  const n = (await listClips()).filter((c) => !clipsIds.has(c.id)).length;
+  const nw = (await listClips()).filter((c) => !clipsIds.has(c.id)), n = nw.length;
   if (!n || view !== 'clips' || assigning || !trainerOk) return;
+  // nye klip fra en anden træning end den viste: pillen siger hvilken og skifter til den
+  const other = clipsSel !== 'all' && clipsF.day != null && !nw.some((c) => dayNum(c.at) === clipsSel) ? dayNum(Math.max(...nw.map((c) => c.at))) : null;
   let p = $('newPill');
   if (!p) {
     p = document.createElement('button'); p.id = 'newPill'; p.className = 'acc';
-    p.onclick = () => { $('clips').scrollTop = 0; renderClips(); };
     $('clipsWrap').prepend(p);
   }
-  p.textContent = `${n} ${n === 1 ? 'nyt klip' : 'nye klip'} · tryk for at vise`;
+  p.onclick = () => { if (other != null) clipsF.day = other; $('clips').scrollTop = 0; renderClips(); };
+  p.textContent = `${n} ${n === 1 ? 'nyt klip' : 'nye klip'}${other != null ? ' fra ' + trainName(dayAt(other)) : ''} · tryk for at vise`;
 }
 function refreshLists() {
   if (view === 'clips' && !assigning && trainerOk) { if (listBusy()) clipsNote(); else renderClips(); }
@@ -2042,7 +2044,31 @@ async function delAny(id) {
   if (cloudTrainer && (c?.cloud || remoteCache.has(id)) && path) { await sb.storage.from('clips').remove([path]); await sb.from('clips').delete().eq('id', id); }
 }
 
-const clipsF = { g: 'all', day: 'all' }; // filter huskes, mens appen er åben
+// Træninger = de lokale datoer (dayNum), der har klip. day: null = seneste træning, 'all' = alle, ellers et dayNum.
+const clipsF = { g: 'all', day: null }; // filter huskes, mens appen er åben
+let clipsSel = 'all'; // den træning, Klip-listen sidst viste (til pillen med nye klip)
+const TR_WD = ['søn', 'man', 'tir', 'ons', 'tor', 'fre', 'lør'], TR_MO = ['jan', 'feb', 'mar', 'apr', 'maj', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+function dayAt(k) { return new Date(Math.floor(k / 10000), Math.floor(k / 100) % 100 - 1, k % 100, 12).getTime(); }
+// "I dag", "I går", "tor 20. nov" (cap: stort begyndelsesbogstav; abs: altid ugedag og dato)
+function trainName(ms, cap, abs) {
+  const k = dayNum(ms), n = Date.now();
+  if (!abs && k === dayNum(n)) return 'I dag';
+  if (!abs && k === dayNum(n - 864e5)) return 'I går';
+  const d = new Date(ms), t = `${TR_WD[d.getDay()]} ${d.getDate()}. ${TR_MO[d.getMonth()]}${d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : ''}`;
+  return cap ? t[0].toUpperCase() + t.slice(1) : t;
+}
+function trainHead(ms) { const r = trainName(ms, true); return /^I (dag|går)$/.test(r) ? `${r} · ${trainName(ms, false, true)}` : r; }
+function trainList(list) { // [{k, at, n, u}] nyeste først
+  const m = new Map();
+  for (const c of list) { const k = dayNum(c.at); const t = m.get(k) || { k, at: dayAt(k), n: 0, u: 0 }; t.n++; if (!c.g) t.u++; m.set(k, t); }
+  return [...m.values()].sort((a, b) => b.k - a.k);
+}
+function trainSel(trains) {
+  if (clipsF.day === 'all') return 'all';
+  if (trains.some((t) => t.k === clipsF.day)) return clipsF.day;
+  return trains.length ? trains[0].k : 'all';
+}
+const clockOf = (ms) => new Date(ms).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
 async function renderClips() {
   assigning = false;
   const w = $('clipsWrap');
@@ -2050,37 +2076,46 @@ async function renderClips() {
   w.innerHTML = w.innerHTML || '<p class="muted">Henter klip …</p>';
   const list = await allClips(); clipPool = list; clipsIds = new Set(list.map((c) => c.id));
   const onlyUnk = w.dataset.unk === '1';
-  const tk = dayNum(Date.now()), yk = dayNum(Date.now() - 864e5);
+  const trains = trainList(list), sel = trainSel(trains), selT = trains.find((t) => t.k === sel);
+  clipsSel = sel;
+  const unkAll = list.filter((c) => !c.g).length, unkN = selT ? selT.u : unkAll;
   const shown = list.filter((c) => (!onlyUnk || !c.g) && (clipsF.g === 'all' || c.g === +clipsF.g)
-    && (clipsF.day === 'all' || dayNum(c.at) === (clipsF.day === 'today' ? tk : yk)));
+    && (sel === 'all' || dayNum(c.at) === sel));
   plList = shown;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${sel === TEAM ? ' selected' : ''}>Holdet (alle kan se)</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   const fopts = `<option value="all"${clipsF.g === 'all' ? ' selected' : ''}>Alle gymnaster</option><option value="0"${clipsF.g === '0' ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${clipsF.g === String(TEAM) ? ' selected' : ''}>Holdet</option>`
     + S.roster.map((g) => `<option value="${g.n}"${clipsF.g === String(g.n) ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
   const groups = [];
   for (const c of shown) { const k = dayNum(c.at); const last = groups[groups.length - 1]; if (last && last.k === k) last.l.push(c); else groups.push({ k, at: c.at, l: [c] }); }
+  const chip = (k, name, n, u) => `<button data-day="${k}" aria-pressed="${sel === k}"><b>${esc(name)}</b><span>${n} klip${u ? ` · <em>${u} ${u === 1 ? 'ukendt' : 'ukendte'}</em>` : ''}</span></button>`;
   const card = (c) => `
       <div class="clip${c.g ? '' : ' unk'}">
         <button class="thumb" data-play="${esc(c.id)}"${thumbCss(c.thumb)} aria-label="Afspil">${PLAY_SVG}<span>${num(c.dur)} s</span></button>
         <div class="meta"><div class="who${c.g ? '' : ' unk'}">${esc(c.g ? gName(c.g) : 'Ukendt')}${!c.g && c.tag ? ` <small>Skilt ${esc(String(c.tag))}</small>` : ''}</div>
-          <b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
+          <b>${esc(clockOf(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
           <select data-g="${esc(c.id)}" aria-label="Gymnast">${opts(c.g)}</select>
           <button class="bad ghost" data-del="${esc(c.id)}">Slet</button></div></div>`;
+  const sl = $('trains') ? $('trains').scrollLeft : null; // bevar den vandrette rulning ved genopbygning
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
-      <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
+      <button id="assignBtn" class="acc"${unkN ? '' : ' disabled'}>Tildel ukendte${selT ? ' fra ' + esc(trainName(selT.at)) : ''} (${unkN})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
       <button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
+    ${list.length ? `<div class="trains" id="trains" role="group" aria-label="Træning">${chip('all', 'Alle', list.length, unkAll)}${trains.map((t) => chip(t.k, trainName(t.at, true), t.n, t.u)).join('')}</div>` : ''}
     <div class="row filt"><select id="fG" aria-label="Vis gymnast">${fopts}</select>
-      <div class="seg" id="fDay" role="group" aria-label="Dag">${[['today', 'I dag'], ['yest', 'I går'], ['all', 'Alle']].map(([k, t]) => `<button data-day="${k}" aria-pressed="${clipsF.day === k}"${clipsF.day === k ? ' class="on"' : ''}>${t}</button>`).join('')}</div>
-      <span class="muted">${shown.length === list.length ? `${list.length} klip` : `${shown.length} af ${list.length} klip`}</span></div>
+      <span class="muted">${shown.length} ${clipsF.g !== 'all' || onlyUnk ? `af ${selT ? selT.n : list.length} ` : ''}klip${selT ? ' fra ' + esc(trainName(selT.at)) : ''}</span></div>
     <p class="muted">${cloudTrainer ? `${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : 'På denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
-    ${shown.length ? groups.map((g) => `<h3 class="dayh">${esc(fmtDay(g.at))}</h3><div class="grid">${g.l.map(card).join('')}</div>`).join('')
-      : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : list.length ? 'Ingen klip passer til filteret.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
+    ${shown.length ? groups.map((g) => `<h3 class="dayh">${esc(trainHead(g.at))}</h3><div class="grid">${g.l.map(card).join('')}</div>`).join('')
+      : `<div class="empty">${onlyUnk ? `Ingen ukendte klip${selT ? ' fra ' + esc(trainName(selT.at)) : ''}.` : list.length ? 'Ingen klip passer til filteret.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
+  const tr = $('trains');
+  if (tr) {
+    if (sl != null) tr.scrollLeft = sl;
+    else { const b = tr.querySelector('[aria-pressed=true]'); if (b && b.offsetLeft + b.offsetWidth > tr.clientWidth) tr.scrollLeft = b.offsetLeft - 16; }
+    tr.onclick = (e) => { const b = e.target.closest('[data-day]'); if (!b) return; clipsF.day = b.dataset.day === 'all' ? 'all' : +b.dataset.day; $('clips').scrollTop = 0; renderClips(); };
+  }
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
   $('fG').onchange = (e) => { clipsF.g = e.target.value; renderClips(); };
-  $('fDay').onclick = (e) => { const b = e.target.closest('[data-day]'); if (b) { clipsF.day = b.dataset.day; renderClips(); } };
-  if ($('assignBtn')) $('assignBtn').onclick = () => { asLast = null; renderAssign(0); };
+  if ($('assignBtn')) $('assignBtn').onclick = () => { asLast = null; clipsF.day = sel; renderAssign(0); };
   $('lockBtn').onclick = () => lockTrainer(true);
   $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; renderClips(); };
   w.querySelectorAll('[data-play]').forEach((b) => {
@@ -2116,28 +2151,37 @@ async function setClipG(id, g) {
 }
 async function asUndo() {
   if (!asLast) return;
-  const { id, g0 } = asLast; asLast = null;
+  const { id, g0, at } = asLast; asLast = null;
   await setClipG(id, g0);
+  if (clipsF.day !== 'all' && at != null && dayNum(at) !== clipsF.day) clipsF.day = dayNum(at); // fortryd kan føre tilbage til en anden træning
   renderAssign(0, id);
 }
 async function renderAssign(skip, focusId) {
   assigning = true;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
-  const unk = (await allClips()).filter((c) => !c.g).reverse(); // ældste først
+  const all = await allClips(), trains = trainList(all);
+  if (clipsF.day == null) clipsF.day = trainSel(trains);
+  const sel = clipsF.day, selName = sel === 'all' ? '' : trainName(dayAt(sel));
+  const unk = all.filter((c) => !c.g && (sel === 'all' || dayNum(c.at) === sel)).reverse(); // ældste først
   if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; }
   if (focusId) { const k = unk.findIndex((x) => x.id === focusId); if (k >= 0) skip = k; }
   skip = Math.max(0, skip);
   if (!unk.length || skip >= unk.length) {
-    w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer.'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
+    const next = sel === 'all' ? null : trains.find((t) => t.u && t.k !== sel);
+    const msg = unk.length ? `Du har sprunget de resterende${sel === 'all' ? '' : ' fra ' + selName} over.` : sel === 'all' ? 'Alle spring har fået et nummer.' : `Alle klip fra ${selName} har fået et nummer.`;
+    w.innerHTML = `<div class="empty" style="margin-top:20px">${esc(msg)}</div><div class="row" style="justify-content:center;margin-top:12px">${asLast ? '<button id="asUndo0">Fortryd</button>' : ''}<button id="asBack"${next ? '' : ' class="acc"'}>Tilbage til klip</button>${next ? `<button class="acc" id="asNext">Fortsæt med ${esc(trainName(next.at))} (${next.u})</button>` : ''}</div>`;
     $('asBack').onclick = renderClips;
-    if (asLast) { $('asBack').insertAdjacentHTML('beforebegin', '<button id="asUndo0">Fortryd</button>'); $('asUndo0').onclick = asUndo; }
+    if (asLast) $('asUndo0').onclick = asUndo;
+    if (next) $('asNext').onclick = () => { clipsF.day = next.k; asLast = null; renderAssign(0); };
     return;
   }
+  const dopts = trains.filter((t) => t.u || t.k === sel);
+  const daySel = `<select id="asDayS" aria-label="Træning"><option value="all"${sel === 'all' ? ' selected' : ''}>Alle træninger (${all.filter((x) => !x.g).length})</option>${dopts.map((t) => `<option value="${t.k}"${t.k === sel ? ' selected' : ''}>${esc(trainName(t.at, true))} (${t.u})</option>`).join('')}</select>`;
   const c = await getAny(unk[skip].id);
   const list = S.roster; // alle gymnaster: navn hvis det findes, ellers Nr. N
-  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + esc(c.tag) : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
-      <button id="asDone">Færdig</button></div>
+  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${sel === 'all' ? '' : esc(trainName(c.at, true)) + ' · '}${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + esc(c.tag) : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(sel === 'all' ? fmtTime(c.at) : clockOf(c.at))}</span></h2>
+      <span class="asDay">${daySel}</span><button id="asDone">Færdig</button></div>
     <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
       ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${safeThumb(c.thumb)}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
     </div>
@@ -2148,10 +2192,11 @@ async function renderAssign(skip, focusId) {
     <div class="row" style="margin-top:12px"><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
   if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else { v.src = c.url; remoteBlobUrl(c).then((u) => { if (u && u !== c.url && $('asV') === v) { const t = v.currentTime, r = v.playbackRate; v.src = u; v.addEventListener('loadedmetadata', () => { v.currentTime = t; v.playbackRate = r; v.play().catch(() => {}); }, { once: true }); } }); } v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
   else $('asSlow').hidden = true;
-  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { const prev = { id: c.id, g0: c.g || 0, to: +b.dataset.as }; if (!(await setClipG(c.id, +b.dataset.as))) return; asLast = prev; toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
+  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { const prev = { id: c.id, g0: c.g || 0, to: +b.dataset.as, at: c.at }; if (!(await setClipG(c.id, +b.dataset.as))) return; asLast = prev; toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
   $('asSkip').onclick = () => renderAssign(skip + 1);
   $('asPrev').onclick = () => renderAssign(skip - 1);
   $('asUndo').onclick = asUndo;
+  $('asDayS').onchange = (e) => { clipsF.day = e.target.value === 'all' ? 'all' : +e.target.value; renderAssign(0); };
   $('asDone').onclick = () => { if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; } renderClips(); };
   $('asDel').onclick = async (e) => {
     if (!confirm2(e.target, 'Tryk igen for at slette')) return;
