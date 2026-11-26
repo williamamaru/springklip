@@ -361,6 +361,22 @@ function label(x, y, text, sub, dpr, on) {
   if (sub) { sx.font = `500 ${13 * dpr}px -apple-system,Arial,sans-serif`; sx.fillStyle = on ? '#1d1203' : '#9aa7b4'; sx.fillText(sub, x + 18 * dpr + w1, y + bh / 2 + 1); }
   sx.restore();
 }
+// Stort mærke midt/øverst i billedet, læseligt på 4 m: PAUSE (lys) og SPOLET (orange). Aldrig rødt (rød = optager).
+function stateMark(R, dpr, kind, text) {
+  const h = Math.max(44 * dpr, Math.min(R.h * 0.14, 88 * dpr)), fs = h * 0.56, pad = h * 0.4;
+  sx.save();
+  sx.font = `800 ${fs}px -apple-system,Arial,sans-serif`;
+  const tw = sx.measureText(text).width, iw = kind === 'pause' ? h * 0.36 : 0;
+  const w = tw + pad * 2 + (iw ? iw + pad * 0.7 : 0);
+  const x = R.x + (R.w - w) / 2, y = R.y + (R.w < 480 * dpr ? 56 * dpr : 12 * dpr);
+  sx.fillStyle = kind === 'pause' ? '#f1f3f5' : '#f29a1f';
+  sx.beginPath(); (sx.roundRect ? sx.roundRect(x, y, w, h, h * 0.2) : sx.rect(x, y, w, h)); sx.fill();
+  sx.fillStyle = kind === 'pause' ? '#14181c' : '#1d1203';
+  let tx = x + pad;
+  if (iw) { const bw = iw * 0.36, bh = h * 0.5, by = y + (h - bh) / 2; sx.fillRect(tx, by, bw, bh); sx.fillRect(tx + iw - bw, by, bw, bh); tx += iw + pad * 0.7; }
+  sx.textBaseline = 'middle'; sx.fillText(text, tx, y + h / 2 + fs * 0.04);
+  sx.restore();
+}
 function drawLoop() {
   requestAnimationFrame(drawLoop);
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -398,6 +414,8 @@ function drawLoop() {
     const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
     const sub = paused ? 'pause' : filling ? `forsinkelse om ${Math.max(1, Math.ceil(behind - have))} s` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : '');
     label(R.x + 10 * dpr, R.y + 10 * dpr, txt, S.clipOn === false && i === 0 && !paused ? (sub ? sub + ' · klip fra' : 'klip fra') : sub, dpr, P.length > 1 && i === sel);
+    if (paused) stateMark(R, dpr, 'pause', 'PAUSE');
+    else if (!filling && Math.abs(lags[i] - S.delays[i]) > 0.5) { const d = Math.round(lags[i] - S.delays[i]); stateMark(R, dpr, 'seek', `SPOLET ${d > 0 ? '−' : '+'}${Math.abs(d)} s`); }
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
   });
   for (let i = P.length; i < 4; i++) { if (ENG === 'h264' && HP[i].dec) hpDrop(i); vs[i].cur = null; }
@@ -1280,25 +1298,49 @@ let clipPool = []; // klippene i den liste, afspilleren er åbnet fra (til "Samm
 
 // ---------- Afspiller ----------
 const plV = $('plVideo'), plC = $('plCanvas');
-let plUrl = null, plTimer = null, plRate = 1, plClip = null;
+let plUrl = null, plTimer = null, plRate = 1, plClip = null, plLoop = true, plCoach = false;
+let plList = []; // klippene i den viste/filtrerede liste: til Næste/Forrige i afspilleren
+const plName = (c) => (view === 'mine' && mineData?.name && c.g === mineG ? mineData.name : gName(c.g));
+function plSetRate(r) {
+  plRate = r;
+  $('plSlow').textContent = plRate === 1 ? 'Slowmotion' : 'Normal fart';
+  $('plSpeed').querySelectorAll('[data-r]').forEach((b) => { const on = +b.dataset.r === r; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  if (r !== 1) plSwap();
+  if (plClip?.blob || plClip?.url) plV.playbackRate = r; else if (plClip?.frames) playFrames(plClip.frames);
+}
+function plNavUpd() {
+  const i = plList.findIndex((x) => x.id === plClip?.id);
+  $('plPrevClip').disabled = !(i > 0); $('plNextClip').disabled = !(i >= 0 && i < plList.length - 1);
+  $('plNav').hidden = plList.length < 2 || i < 0;
+  $('plPos').textContent = i >= 0 ? `${i + 1} / ${plList.length}` : '';
+}
+async function plGo(d) {
+  const i = plList.findIndex((x) => x.id === plClip?.id), t = plList[i + d];
+  if (i < 0 || !t) return;
+  const full = t.url || t.blob || t.frames ? t : await getAny(t.id);
+  if (!full) { toast('Klippet kan ikke åbnes'); return; }
+  openClip(full, { coach: plCoach, keep: true });
+}
 async function openClip(id, o = {}) {
   const c = typeof id === 'object' ? id : await getClip(id);
   if (!c) return;
   drawReset(!!o.coach && trainerOk && !document.body.classList.contains('gymnast'));
-  plClip = c; plRate = 1; $('plSlow').textContent = 'Slowmotion';
-  $('plTitle').textContent = `${gName(c.g)} · ${fmtTime(c.at)}`;
-  $('player').hidden = false; plV.dataset.blob = '';
+  plCoach = !!o.coach;
+  plClip = c; plRate = o.keep ? plRate : 1; $('plSlow').textContent = plRate === 1 ? 'Slowmotion' : 'Normal fart';
+  $('plSpeed').querySelectorAll('[data-r]').forEach((b) => { const on = +b.dataset.r === plRate; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  $('plTitle').textContent = `${plName(c)} · ${fmtTime(c.at)}`;
+  $('player').hidden = false; plV.dataset.blob = ''; plV.loop = plLoop; plNavUpd();
   $('plPrev').hidden = !(c.g > 0 && (c.blob || c.url));
   if (plUrl) { URL.revokeObjectURL(plUrl); plUrl = null; }
   if (c.url) {
     plC.hidden = true; plV.hidden = false; plUrl = null;
-    plV.src = c.url; plV.playbackRate = 1; plV.play().catch(() => {});
-    $('plSave').hidden = true;
+    plV.src = c.url; plV.playbackRate = plRate; plV.play().catch(() => {});
+    const a = $('plSave'); a.hidden = false; a.removeAttribute('href'); a.removeAttribute('download');
     remoteBlobUrl(c); // hent i baggrunden, så slowmotion kan spole lokalt
   } else if (c.blob) {
     plC.hidden = true; plV.hidden = false;
     plUrl = URL.createObjectURL(c.blob);
-    plV.src = plUrl; plV.playbackRate = 1; plV.play().catch(() => {});
+    plV.src = plUrl; plV.playbackRate = plRate; plV.play().catch(() => {});
     const a = $('plSave'); a.hidden = false; a.href = plUrl;
     a.download = `spring-${c.g || 'ukendt'}-${new Date(c.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.${c.blob.type.includes('mp4') ? 'mp4' : 'webm'}`;
   } else {
@@ -1320,7 +1362,7 @@ async function playFrames(fr) {
     if (i < fr.length) {
       const due = (fr[i].t * 1000) / plRate - (performance.now() - t0);
       plTimer = setTimeout(tick, Math.max(0, due));
-    }
+    } else if (plLoop && plClip && plClip.frames === fr) plTimer = setTimeout(() => { if (!$('player').hidden && plClip.frames === fr) playFrames(fr); }, 600);
   };
   tick();
 }
@@ -1346,11 +1388,55 @@ $('plPrev').onclick = async () => {
   $('player').hidden = true; plV.pause(); clearTimeout(plTimer); drawReset(false);
   openCompare(full, c);
 };
-$('plSlow').onclick = () => {
-  plRate = plRate === 1 ? 0.4 : 1;
-  $('plSlow').textContent = plRate === 1 ? 'Slowmotion' : 'Normal fart';
-  if (plRate !== 1) plSwap();
-  if (plClip?.blob || plClip?.url) plV.playbackRate = plRate; else playFrames(plClip.frames);
+$('plSlow').onclick = () => plSetRate(plRate === 1 ? 0.4 : 1); // skjult, men beholdt (gammel 0,4-knap)
+$('plSpeed').onclick = (e) => { const b = e.target.closest('[data-r]'); if (b) plSetRate(+b.dataset.r); };
+$('plLoopBtn').onclick = () => {
+  plLoop = !plLoop; plV.loop = plLoop;
+  $('plLoopBtn').setAttribute('aria-pressed', plLoop); $('plLoopBtn').classList.toggle('on', plLoop);
+  if (plLoop && plV.ended) plV.play().catch(() => {});
+};
+$('plPrevClip').onclick = () => plGo(-1);
+$('plNextClip').onclick = () => plGo(1);
+// tryk på billedet = pause/afspil, vandret stryg = forrige/næste klip. Ligger over billedet, men over betjeningslinjen i bunden.
+(() => {
+  const t = $('plTap'); let d = null;
+  const mark = $('plMark');
+  const syncMark = () => { mark.hidden = !plV.paused || dw.on || plV.hidden; };
+  ['play', 'pause', 'ended', 'loadeddata', 'emptied'].forEach((e) => plV.addEventListener(e, syncMark));
+  t.onpointerdown = (e) => { d = { x: e.clientX, y: e.clientY, t: Date.now() }; };
+  t.onpointercancel = () => { d = null; };
+  t.onpointerup = (e) => {
+    if (!d) return;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y, dt = Date.now() - d.t; d = null;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) { plGo(dx < 0 ? 1 : -1); return; }
+    if (Math.abs(dx) < 12 && Math.abs(dy) < 12 && dt < 600 && !dw.on) {
+      if (plV.hidden) { if (plTimer) { clearTimeout(plTimer); plTimer = 0; } else if (plClip?.frames) playFrames(plClip.frames); return; }
+      if (plV.paused || plV.ended) plV.play().catch(() => {}); else plV.pause();
+    }
+  };
+})();
+// Gem/del video. Skyklip hentes som fil (fra cachen, hvis den allerede er hentet). iPhone/iPad: del-arket med fil; ellers download; ellers åbn i ny fane.
+async function plBlobFor(c) {
+  if (c.blob) return c.blob;
+  if (!c.url) return null;
+  if (!blobC.get(c.id)) await remoteBlobUrl(c);
+  return blobC.get(c.id)?.blob || null;
+}
+$('plSave').onclick = async (e) => {
+  e.preventDefault();
+  const c = plClip; if (!c) return;
+  const name = `spring-${c.g > 0 ? c.g : 'ukendt'}-${new Date(c.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}`;
+  let blob = null;
+  try { blob = await plBlobFor(c); } catch {}
+  if (!blob) { if (c.url) { window.open(c.url, '_blank', 'noopener'); } else toast('Videoen kunne ikke gemmes'); return; }
+  const f = new File([blob], `${name}.${blob.type.includes('mp4') || !blob.type ? 'mp4' : 'webm'}`, { type: blob.type || 'video/mp4' });
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (ios && navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f] }); return; } catch (err) { if (err && err.name === 'AbortError') return; }
+  }
+  const u = URL.createObjectURL(f), a = document.createElement('a');
+  a.href = u; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 60000);
 };
 $('plReplay').onclick = () => {
   if (plClip?.blob || plClip?.url) { plV.currentTime = 0; plV.playbackRate = plRate; plV.play().catch(() => {}); } else playFrames(plClip.frames);
@@ -1391,6 +1477,7 @@ function dwSet(on) {
   const b = $('plDrawBtn'); b.setAttribute('aria-pressed', dw.on); b.classList.toggle('on', dw.on);
   $('plTools').hidden = !dw.on;
   dw.cv.classList.toggle('on', dw.on);
+  $('plTap').hidden = dw.on; $('plMark').hidden = dw.on || !plV.paused || plV.hidden;
   if (dw.on) { plV.pause(); clearTimeout(plTimer); plV.controls = false; $('plStep').hidden = plV.hidden; }
   else { plV.controls = true; if (dw.cur && dw.cur.t === 'angle' && dw.cur.p.length < 3) dwDropCur(); }
   dwVis();
@@ -1657,7 +1744,7 @@ function pickForCompare(c, btn, rerender) {
   else toast('Vælg ét klip mere');
 }
 async function cmpSrc(c) { if (c.url) return remoteBlobUrl(c); const u = URL.createObjectURL(c.blob); cmp.urls.push(u); return u; }
-function cmpLabel(c) { return `${c.g ? gName(c.g) : 'Ukendt'} · ${fmtTime(c.at)}`; }
+function cmpLabel(c) { return `${plName(c)} · ${fmtTime(c.at)}`; }
 async function openCompare(a, b) {
   cmp.a = a; cmp.b = b; cmp.off = 0; cmp.rate = 1;
   $('cmpAt').textContent = cmpLabel(a); $('cmpBt').textContent = cmpLabel(b);
@@ -1736,14 +1823,40 @@ function show(v) {
   if (v !== 'mine') mineG = null;
   if (v !== 'setup') setupPulled = false;
 }
-function fmtTime(ms) {
+function dayKey(ms) { const d = new Date(ms); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function fmtDay(ms) {
+  const k = dayKey(ms), n = Date.now();
+  if (k === dayKey(n)) return 'I dag';
+  if (k === dayKey(n - 864e5)) return 'I går';
   const d = new Date(ms);
-  return d.toLocaleDateString('da-DK', { day: 'numeric', month: 'short' }) + ' ' + d.toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return d.toLocaleDateString('da-DK', d.getFullYear() === new Date().getFullYear() ? { day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short', year: 'numeric' });
+}
+function fmtTime(ms) { return fmtDay(ms) + ' ' + new Date(ms).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' }); }
+const PLAY_SVG = '<svg class="play" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M10 8l6 4-6 4z"/></svg>';
+// Listen genopbygges ikke, mens brugeren rører, ruller eller har noget åbent: i stedet vises en pille med antal nye klip.
+let lastTouch = 0, clipsIds = new Set();
+['pointerdown', 'pointermove', 'touchstart', 'touchmove', 'wheel', 'scroll'].forEach((e) => document.addEventListener(e, () => { lastTouch = Date.now(); }, { capture: true, passive: true }));
+function listBusy() {
+  const v = $('clips');
+  return Date.now() - lastTouch < 3000 || v.scrollTop > 8 || !$('player').hidden || !$('cmp').hidden || !!cmpPick
+    || document.activeElement?.tagName === 'SELECT' || !!v.querySelector('[data-sure]');
+}
+async function clipsNote() {
+  const n = (await listClips()).filter((c) => !clipsIds.has(c.id)).length;
+  if (!n || view !== 'clips' || assigning) return;
+  let p = $('newPill');
+  if (!p) {
+    p = document.createElement('button'); p.id = 'newPill'; p.className = 'acc';
+    p.onclick = () => { $('clips').scrollTop = 0; renderClips(); };
+    $('clipsWrap').prepend(p);
+  }
+  p.textContent = `${n} ${n === 1 ? 'nyt klip' : 'nye klip'} · tryk for at vise`;
 }
 function refreshLists() {
-  if (view === 'clips' && !assigning) renderClips();
-  if (view === 'mine' && mineG) renderMine();
+  if (view === 'clips' && !assigning) { if (listBusy()) clipsNote(); else renderClips(); }
+  if (view === 'mine' && mineG && Date.now() - lastTouch > 3000 && $('player').hidden) renderMine();
 }
+setInterval(() => { if (view === 'clips' && !assigning && $('newPill') && !listBusy()) renderClips(); }, 1500);
 
 // Trænerkode
 function pinScreen(wrap, title, onOk) {
@@ -1825,31 +1938,45 @@ async function delAny(id) {
   if (cloudTrainer && (c?.cloud || remoteCache.has(id)) && path) { await sb.storage.from('clips').remove([path]); await sb.from('clips').delete().eq('id', id); }
 }
 
+const clipsF = { g: 'all', day: 'all' }; // filter huskes, mens appen er åben
 async function renderClips() {
   assigning = false;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
   w.innerHTML = w.innerHTML || '<p class="muted">Henter klip …</p>';
-  const list = await allClips(); clipPool = list;
+  const list = await allClips(); clipPool = list; clipsIds = new Set(list.map((c) => c.id));
   const onlyUnk = w.dataset.unk === '1';
-  const shown = onlyUnk ? list.filter((c) => !c.g) : list;
+  const tk = dayKey(Date.now()), yk = dayKey(Date.now() - 864e5);
+  const shown = list.filter((c) => (!onlyUnk || !c.g) && (clipsF.g === 'all' || c.g === +clipsF.g)
+    && (clipsF.day === 'all' || dayKey(c.at) === (clipsF.day === 'today' ? tk : yk)));
+  plList = shown;
   const opts = (sel) => `<option value="0"${!sel ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${sel === TEAM ? ' selected' : ''}>Holdet (alle kan se)</option>` + S.roster.map((g) => `<option value="${g.n}"${g.n === sel ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
+  const fopts = `<option value="all"${clipsF.g === 'all' ? ' selected' : ''}>Alle gymnaster</option><option value="0"${clipsF.g === '0' ? ' selected' : ''}>Ukendt</option><option value="${TEAM}"${clipsF.g === String(TEAM) ? ' selected' : ''}>Holdet</option>`
+    + S.roster.map((g) => `<option value="${g.n}"${clipsF.g === String(g.n) ? ' selected' : ''}>${esc(gName(g.n))}</option>`).join('');
+  const groups = [];
+  for (const c of shown) { const k = dayKey(c.at); const last = groups[groups.length - 1]; if (last && last.k === k) last.l.push(c); else groups.push({ k, at: c.at, l: [c] }); }
+  const card = (c) => `
+      <div class="clip${c.g ? '' : ' unk'}">
+        <button class="thumb" data-play="${esc(c.id)}"${thumbCss(c.thumb)} aria-label="Afspil">${PLAY_SVG}<span>${num(c.dur)} s</span></button>
+        <div class="meta"><div class="who${c.g ? '' : ' unk'}">${esc(c.g ? gName(c.g) : 'Ukendt')}${!c.g && c.tag ? ` <small>Skilt ${esc(String(c.tag))}</small>` : ''}</div>
+          <b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
+          <select data-g="${esc(c.id)}" aria-label="Gymnast">${opts(c.g)}</select>
+          <button class="bad ghost" data-del="${esc(c.id)}">Slet</button></div></div>`;
   w.innerHTML = `<div class="row"><h2 style="flex:1">Klip</h2>
       <button id="assignBtn" class="acc"${list.some((c) => !c.g) ? '' : ' disabled'}>Tildel ukendte (${list.filter((c) => !c.g).length})</button>
       <button id="unkBtn" class="${onlyUnk ? 'on' : ''}">Kun ukendte</button>
       <button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>
       <button id="lockBtn" class="ghost">Lås</button></div>
-    <p class="muted">${list.length} klip${cloudTrainer ? ` · ${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : ' på denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
-    ${shown.length ? `<div class="grid">${shown.map((c) => `
-      <div class="clip${c.g ? '' : ' unk'}">
-        <button class="thumb" data-play="${esc(c.id)}"${thumbCss(c.thumb)} aria-label="Afspil"><span>${num(c.dur)} s</span></button>
-        <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
-          ${!c.g && c.tag ? `<span class="muted" style="font-size:14px">Skilt ${esc(c.tag)}</span>` : ''}
-          <select data-g="${esc(c.id)}" aria-label="Gymnast">${opts(c.g)}</select>
-          <button class="bad ghost" data-del="${esc(c.id)}">Slet</button></div></div>`).join('')}</div>`
-      : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
+    <div class="row filt"><select id="fG" aria-label="Vis gymnast">${fopts}</select>
+      <div class="seg" id="fDay" role="group" aria-label="Dag">${[['today', 'I dag'], ['yest', 'I går'], ['all', 'Alle']].map(([k, t]) => `<button data-day="${k}" aria-pressed="${clipsF.day === k}"${clipsF.day === k ? ' class="on"' : ''}>${t}</button>`).join('')}</div>
+      <span class="muted">${shown.length === list.length ? `${list.length} klip` : `${shown.length} af ${list.length} klip`}</span></div>
+    <p class="muted">${cloudTrainer ? `${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : 'På denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
+    ${shown.length ? groups.map((g) => `<h3 class="dayh">${esc(fmtDay(g.at))}</h3><div class="grid">${g.l.map(card).join('')}</div>`).join('')
+      : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : list.length ? 'Ingen klip passer til filteret.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
-  if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
+  $('fG').onchange = (e) => { clipsF.g = e.target.value; renderClips(); };
+  $('fDay').onclick = (e) => { const b = e.target.closest('[data-day]'); if (b) { clipsF.day = b.dataset.day; renderClips(); } };
+  if ($('assignBtn')) $('assignBtn').onclick = () => { asLast = null; renderAssign(0); };
   $('lockBtn').onclick = () => { trainerOk = false; renderClips(); };
   $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; renderClips(); };
   w.querySelectorAll('[data-play]').forEach((b) => {
@@ -1858,6 +1985,7 @@ async function renderClips() {
       const c = await getAny(b.dataset.play);
       if (!c) return;
       if (cmpPick) return pickForCompare(c, b, renderClips);
+      plList = shown;
       openClip(c, { coach: true });
     };
   });
@@ -1871,7 +1999,7 @@ async function renderClips() {
 
 let mineData = null; // { n, name, clips:[{id,at,dur,thumb,url}] } fra skyen
 // Hurtig tildeling: ét ukendt klip ad gangen, tryk på gymnastens nummer.
-let asUrl = null, assigning = false;
+let asUrl = null, assigning = false, asLast = null; // asLast: sidste tildeling, så den kan fortrydes
 async function setClipG(id, g) {
   let c = null;
   try { c = await getClip(id); if (c) { c.g = g; await putClip(c); } }
@@ -1882,32 +2010,44 @@ async function setClipG(id, g) {
   }
   return true;
 }
-async function renderAssign(skip) {
+async function asUndo() {
+  if (!asLast) return;
+  const { id, g0 } = asLast; asLast = null;
+  await setClipG(id, g0);
+  renderAssign(0, id);
+}
+async function renderAssign(skip, focusId) {
   assigning = true;
   const w = $('clipsWrap');
   if (!trainerOk) return pinScreen(w, 'Klip', renderClips);
   const unk = (await allClips()).filter((c) => !c.g).reverse(); // ældste først
   if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; }
+  if (focusId) { const k = unk.findIndex((x) => x.id === focusId); if (k >= 0) skip = k; }
+  skip = Math.max(0, skip);
   if (!unk.length || skip >= unk.length) {
     w.innerHTML = `<div class="empty" style="margin-top:20px">${unk.length ? 'Du har sprunget de resterende over.' : 'Alle spring har fået et nummer.'}</div><div class="row" style="justify-content:center;margin-top:12px"><button class="acc" id="asBack">Tilbage til klip</button></div>`;
-    $('asBack').onclick = renderClips; return;
+    $('asBack').onclick = renderClips;
+    if (asLast) { $('asBack').insertAdjacentHTML('beforebegin', '<button id="asUndo0">Fortryd</button>'); $('asUndo0').onclick = asUndo; }
+    return;
   }
   const c = await getAny(unk[skip].id);
-  const named = S.roster.filter((g) => g.name);
-  const list = named.length ? named : S.roster;
+  const list = S.roster; // alle gymnaster: navn hvis det findes, ellers Nr. N
   w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + esc(c.tag) : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
       <button id="asDone">Færdig</button></div>
     <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
       ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${safeThumb(c.thumb)}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
     </div>
+    <div class="row" style="margin-top:12px"><button id="asPrev"${skip ? '' : ' disabled'}><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Forrige klip</button><button id="asSkip">Spring over</button><button id="asUndo"${asLast ? '' : ' disabled'}><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>Fortryd${asLast ? ': ' + esc(gName(asLast.to)) : ''}</button></div>
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr));margin-top:12px">
-      ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b>${g.name ? `<span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span>` : ''}</button>`).join('')}
+      ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b><span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${g.name ? esc(g.name) : 'Nr. ' + g.n}</span></button>`).join('')}
     </div>
-    <div class="row" style="margin-top:12px"><button id="asSkip">Spring over</button><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
+    <div class="row" style="margin-top:12px"><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
   if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else { v.src = c.url; remoteBlobUrl(c).then((u) => { if (u && u !== c.url && $('asV') === v) { const t = v.currentTime, r = v.playbackRate; v.src = u; v.addEventListener('loadedmetadata', () => { v.currentTime = t; v.playbackRate = r; v.play().catch(() => {}); }, { once: true }); } }); } v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
   else $('asSlow').hidden = true;
-  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { if (!(await setClipG(c.id, +b.dataset.as))) return; toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
+  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { const prev = { id: c.id, g0: c.g || 0, to: +b.dataset.as }; if (!(await setClipG(c.id, +b.dataset.as))) return; asLast = prev; toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
   $('asSkip').onclick = () => renderAssign(skip + 1);
+  $('asPrev').onclick = () => renderAssign(skip - 1);
+  $('asUndo').onclick = asUndo;
   $('asDone').onclick = () => { if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; } renderClips(); };
   $('asDel').onclick = async (e) => {
     if (!confirm2(e.target, 'Tryk igen for at slette')) return;
@@ -1957,12 +2097,12 @@ async function renderMine() {
     return;
   }
   const list = mineData && !mineData.local ? mineData.clips.map((c) => ({ ...c, at: Date.parse(c.at), url: urlPut(c.id, c.url) })) : (await listClips()).filter((c) => c.g === mineG || c.g === TEAM);
-  clipPool = list.map((c) => ({ ...c, g: c.g ?? mineG }));
+  clipPool = list.map((c) => ({ ...c, g: c.g ?? mineG })); plList = clipPool;
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
-    ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}"${thumbCss(c.thumb)} aria-label="Afspil"><span>${num(c.dur)} s</span></button>
-      <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu. Dine spring kommer her, når træneren har sat dit nummer på dem.</div>'}`;
+    ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" ${thumbCss(c.thumb)} aria-label="Afspil">${PLAY_SVG}<span>${num(c.dur)} s</span></button>
+      <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>${c.g === TEAM || c.team ? '<span class="tag">Holdets klip</span>' : ''}</div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu. Dine spring kommer her, når træneren har sat dit nummer på dem.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
   if ($('cmpBtn')) $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; clearTimeout(idleT); renderMine(); };
   w.querySelectorAll('[data-i]').forEach((b) => {
