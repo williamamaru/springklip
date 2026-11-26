@@ -1,5 +1,5 @@
 // Læser nummerskilte (ArUco 4x4) i et billede. Kører i baggrunden, så live-billedet ikke hakker.
-importScripts('lib/cv.js', 'lib/aruco.js?v=20261126230740', 'lib/aruco_4x4_1000.js');
+importScripts('lib/cv.js', 'lib/aruco.js?v=20261126233459', 'lib/aruco_4x4_1000.js');
 
 const detector = new AR.Detector({ dictionaryName: 'ARUCO_4X4_1000', maxHammingDistance: 0 });
 
