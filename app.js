@@ -6,15 +6,56 @@ const $ = (id) => document.getElementById(id);
 const now = () => performance.now() / 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// data fra skyen/lageret i HTML: kun rigtige billed-data-URL'er som miniature, tal som tal
+const safeThumb = (u) => (typeof u === 'string' && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+\/=]+$/.test(u) ? u : '');
+const thumbCss = (u) => { const t = safeThumb(u); return t ? ` style="background-image:url('${t}')"` : ''; };
+const num = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
+// To-tryk-bekræftelse: andet tryk tæller først efter 600 ms (et dobbeltklik er ikke en bekræftelse),
+// og knappen falder tilbage efter 4 s eller når man skifter side.
+const armedBtns = new Set();
+function disarm(b) {
+  if (!b.dataset.sure) return;
+  delete b.dataset.sure; clearTimeout(b._armT); armedBtns.delete(b);
+  if (b._armTxt != null) b.textContent = b._armTxt;
+  if (b._armCls) b.classList.remove(b._armCls);
+}
+const disarmAll = () => [...armedBtns].forEach(disarm);
+function confirm2(b, txt, cls) {
+  const t0 = +b.dataset.sure || 0, dt = performance.now() - t0;
+  if (t0 && dt >= 600) { disarm(b); return true; }
+  if (t0) return false; // for hurtigt efter første tryk
+  b._armTxt = b.textContent; b._armCls = cls || '';
+  b.dataset.sure = String(performance.now() || 1); b.textContent = txt;
+  if (cls) b.classList.add(cls);
+  armedBtns.add(b); clearTimeout(b._armT); b._armT = setTimeout(() => disarm(b), 4000);
+  return false;
+}
 
 // ---------- Opsætning ----------
 const KEY = 'springklip.v1';
 const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 10, trainerHash: '', roster: [] };
 let S;
-try { S = Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { S = { ...DEF }; }
+try { const o = JSON.parse(localStorage.getItem(KEY) || '{}'); S = Object.assign({}, DEF, o && typeof o === 'object' && !Array.isArray(o) ? o : {}); } catch { S = { ...DEF }; }
+// ødelagte/gamle data i localStorage må ikke give en hvid side: ret alt til gyldige værdier
+{
+  const fin = (v) => typeof v === 'number' && isFinite(v);
+  const okRect = (z) => z && typeof z === 'object' && ['x0', 'y0', 'x1', 'y1'].every((k) => fin(z[k]));
+  const okLane = (z) => z && z.type === 'lane' && Array.isArray(z.pts) && z.pts.length === 4 && z.pts.every((q) => q && fin(q.x) && fin(q.y));
+  if (!okRect(S.zone)) S.zone = DEF.zone;
+  if (Array.isArray(S.presets)) S.presets = S.presets.filter((p) => p && typeof p === 'object').map((p, i) => ({ ...p, name: typeof p.name === 'string' && p.name ? p.name : `Opstilling ${i + 1}`, zones: Array.isArray(p.zones) ? p.zones.filter((z) => okLane(z) || (z?.type !== 'lane' && okRect(z))).slice(0, 4) : [] }));
+  if (!(fin(S.delay) && S.delay >= 0 && S.delay <= 90)) delete S.delay;
+  if (Array.isArray(S.delays)) S.delays = S.delays.slice(0, 4).map((d, i) => (fin(d) ? Math.max(0, Math.min(90, Math.round(d))) : DEF.delays[i]));
+  if (![1, 2, 4].includes(S.views)) S.views = DEF.views;
+  if (!(fin(S.sens) && S.sens > 0)) S.sens = DEF.sens;
+  if (!(fin(S.keepDays) && S.keepDays >= 1)) S.keepDays = DEF.keepDays;
+  if (S.facing !== 'user') S.facing = 'environment';
+  if (typeof S.trainerHash !== 'string') S.trainerHash = '';
+  S.roster = Array.isArray(S.roster) ? S.roster.filter((g) => g && typeof g === 'object' && isFinite(+g.n) && +g.n > 0).map((g) => ({ ...g, n: Math.round(+g.n), name: typeof g.name === 'string' ? g.name : '', code: typeof g.code === 'string' ? g.code : '' })) : [];
+  if (S.checkin && (typeof S.checkin !== 'object' || !S.checkin.map || typeof S.checkin.map !== 'object')) S.checkin = null;
+}
 // opstillinger: hver har sit navn (fx Trampet, Bane) og sine luftfelter
 if (!Array.isArray(S.presets) || !S.presets.length) S.presets = [{ name: 'Trampet', zones: [S.zone || DEF.zone] }, { name: 'Bane', zones: [] }];
-if (!(S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
+if (!(Number.isInteger(S.pi) && S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
 const preset = () => S.presets[S.pi];
 if (!Array.isArray(S.delays) || S.delays.length < 4) S.delays = [S.delay ?? 30, 33, 36, 39];
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} };
@@ -66,11 +107,15 @@ async function tx(mode, fn) {
     const t = d.transaction('clips', mode);
     const st = t.objectStore('clips');
     let out;
-    Promise.resolve(fn(st)).then((v) => (out = v));
+    Promise.resolve(fn(st)).then((v) => (out = v), (e) => { try { t.abort(); } catch {} rej(e); });
     t.oncomplete = () => res(out);
-    t.onerror = () => rej(t.error);
+    t.onerror = (e) => rej(t.error || e?.target?.error || new DOMException('Skrivningen fejlede', 'AbortError'));
+    // fuldt lager (QuotaExceededError) eller afbrudt skrivning: ellers hænger løftet for evigt
+    t.onabort = () => rej(t.error || new DOMException('Skrivningen blev afbrudt', 'AbortError'));
   });
 }
+const STORE_FULL = 'Kunne ikke gemme klippet: lageret er fuldt';
+const saveErrMsg = (e) => (!e || /quota|abort/i.test(`${e.name} ${e.message}`) ? STORE_FULL : 'Kunne ikke gemme klippet');
 const reqP = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const putClip = (c) => tx('readwrite', (s) => s.put(c));
 const delClip = (id) => tx('readwrite', (s) => s.delete(id));
@@ -114,7 +159,24 @@ let ring = []; // {t, blob}
 let pending = 0, running = false, lastCap = 0, stream = null, wakeLock = null;
 const bufferSec = () => Math.max(Math.max(...S.delays.slice(0, S.views)) + 25, 70);
 
+let camStarting = false, camLost = false;
 async function startCamera(file) {
+  if (!file && camStarting) return; // dobbelttryk på "Start kamera" må ikke åbne to kameraer
+  camStarting = true; $('startCam').disabled = true;
+  try { await startCamera0(file); } finally { camStarting = false; $('startCam').disabled = false; }
+}
+// kameraet blev afbrudt (fx taget af en anden app eller frakoblet): vis startboksen igen, behold buffer og klip
+function camGone(st) {
+  if (st !== stream || !running) return;
+  running = false; camLost = true; setRec();
+  if (hold.on) holdStop();
+  if (active) { const s0 = active.start; active = null; if (lastAbove - s0 >= 0.25) newSpring(s0, lastAbove); }
+  springs.filter((s) => s.state === 'reading').forEach(finishSpring);
+  $('camErr').textContent = 'Kameraet blev afbrudt. Tryk for at starte igen.';
+  $('startBox').hidden = false;
+}
+function watchStream(st) { st.getVideoTracks().forEach((t) => t.addEventListener('ended', () => camGone(st))); }
+async function startCamera0(file) {
   $('camErr').textContent = '';
   try {
     if (file) {
@@ -122,10 +184,12 @@ async function startCamera(file) {
       cam.src = URL.createObjectURL(file);
       cam.loop = false;
     } else {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: { facingMode: S.facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
       });
+      watchStream(stream);
       cam.src = '';
       cam.srcObject = stream;
     }
@@ -135,12 +199,16 @@ async function startCamera(file) {
     return;
   }
   for (let i = 0; i < 4; i++) hpDrop(i);
+  const eng0 = ENG;
   ENG = 'jpeg';
   if (S.engine === 'h264') {
     if (await h264Probe()) ENG = 'h264';
     else toast('Den nye motor understøttes ikke på denne enhed. Bruger standardmotoren.');
   }
-  ring = []; prevMot = null; resetSpringState();
+  // genstart efter et afbrudt kamera: behold bufferen (og de spring, der venter på klip), start bare genkendelsen roligt
+  if (camLost && !file && ENG === eng0) { prevMot = null; active = null; motAbove = 0; lastCap = -1e9; lastTag = -1e9; tagBusy = false; tagReq = null; }
+  else { ring = []; prevMot = null; resetSpringState(); }
+  camLost = false;
   running = true;
   $('startBox').hidden = true;
   resetLags();
@@ -352,14 +420,14 @@ function syncDelayUI() {
   for (const b of $('layoutSeg').children) b.classList.toggle('on', +b.dataset.n === S.views);
 }
 function setDelay(v) {
-  S.delays[sel] = Math.max(0, Math.min(120, Math.round(v)));
+  S.delays[sel] = Math.max(0, Math.min(90, Math.round(v)));
   lags[sel] = S.delays[sel];
   if (paused) pausedAt[sel] = now() - lags[sel];
   save(); syncDelayUI();
 }
 $('dMinus').onclick = () => setDelay(S.delays[sel] - 1);
 $('dPlus').onclick = () => setDelay(S.delays[sel] + 1);
-$('delayIn').onchange = (e) => setDelay(+e.target.value || 0);
+$('delayIn').onchange = (e) => { const v = e.target.value.trim() === '' ? NaN : +e.target.value; if (isFinite(v)) setDelay(v); else syncDelayUI(); }; // tomt felt = behold forrige værdi
 $('layoutSeg').onclick = (e) => {
   const b = e.target.closest('button'); if (!b) return;
   S.views = +b.dataset.n; if (sel >= S.views) sel = 0;
@@ -383,7 +451,7 @@ $('flipBtn').classList.toggle('on', S.flip);
 const camGet = (facing, exact) => navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: exact ? { exact: facing } : facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
 async function camUse(ns) {
   stream.getTracks().forEach((t) => t.stop());
-  stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null;
+  stream = ns; watchStream(ns); cam.srcObject = ns; await cam.play(); prevMot = null;
   // nyt kamera kan have et andet ur i tidsstemplerne, og en læsning af det gamle billede kan hænge: start forfra
   lastCap = -1e9; lastTag = -1e9; tagBusy = false; tagReq = null; ci.multiN = 0;
   capLoop();
@@ -391,6 +459,8 @@ async function camUse(ns) {
 $('camSwitch').onclick = async () => {
   // sidder frontkameraet fast efter indtjekningen, prøves tilbageskiftet igen (S.facing er uændret)
   if (ci.front && !ci.open) { ciCamOp(ciToBack); return; }
+  // holdomgangen optager fra det nuværende kamera: et skift ville stoppe optagelsen uden at knappen viser det
+  if (hold.on) { toast('Stop holdomgang først'); return; }
   S.facing = S.facing === 'environment' ? 'user' : 'environment'; save();
   if (!running || !stream) return;
   try {
@@ -545,6 +615,7 @@ function syncPresetUI() {
 }
 function openZoneEdit() {
   if (!running) { toast('Start kameraet først'); syncPresetUI(); return; }
+  disarm($('zoneDel'));
   zoneMode = true; zoneEdit = preset().zones.map((z) => ({ ...z })); lanePts = []; setZoneKind('air');
   $('zoneName').value = preset().name;
   $('zoneDel').hidden = S.presets.length < 2;
@@ -586,8 +657,7 @@ function setZoneKind(k) {
 }
 $('zoneKind').onclick = (e) => { const b = e.target.closest('button'); if (b) setZoneKind(b.dataset.k); };
 $('zoneDel').onclick = (e) => {
-  if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
-  delete e.target.dataset.sure; e.target.textContent = 'Slet opstilling';
+  if (!confirm2(e.target, 'Tryk igen for at slette')) return;
   S.presets.splice(S.pi, 1); S.pi = 0; save();
   zoneMode = false; zoneEdit = null; $('zoneHelp').hidden = true; syncPresetUI();
 };
@@ -862,7 +932,8 @@ function finishSpring(s) {
   if (s.tag) recentTags.push({ g: s.tag, t: s.end });
   while (recentTags.length > 20) recentTags.shift();
   s.state = 'clipping';
-  toast(s.g ? `Spring gemt: ${gName(s.g)}` : s.tag ? `Spring gemt: skilt ${s.tag} er ikke tjekket ind` : 'Spring gemt: ukendt nummer');
+  // "gemt" vises først, når klippet faktisk er skrevet (runClips)
+  s.msg = s.g ? `Spring gemt: ${gName(s.g)}` : s.tag ? `Spring gemt: skilt ${s.tag} er ikke tjekket ind` : 'Spring gemt: ukendt nummer';
   queueClip(s);
 }
 
@@ -1081,24 +1152,30 @@ function queueClip(s) {
 async function runClips() {
   if (clipBusy) return;
   clipBusy = true;
-  while (clipQ.length) {
-    const s = clipQ.shift();
-    const wait = s.end + 2.0 - now();
-    if (wait > 0) await sleep(wait * 1000);
-    const a = s.start - 1.5, b = s.end + 2.0;
-    try {
-      if (ring.length && ring[0].data) await makeClip264(s, a, b);
-      else {
-        const frames = ring.filter((f) => f.t >= a && f.t <= b && f.blob);
-        if (frames.length > 5) await makeClip(s, frames);
+  try {
+    while (clipQ.length) {
+      const s = clipQ.shift();
+      try {
+        const wait = s.end + 2.0 - now();
+        if (wait > 0) await sleep(wait * 1000);
+        const a = s.start - 1.5, b = s.end + 2.0;
+        let ok = false;
+        if (ring.length && ring[0].data) ok = await makeClip264(s, a, b);
+        else {
+          const frames = ring.filter((f) => f.t >= a && f.t <= b && f.blob);
+          if (frames.length > 5) ok = await makeClip(s, frames);
+        }
+        if (ok && s.msg) toast(s.msg);
+      } catch (e) { console.warn('klip fejlede', e); toast(saveErrMsg(e)); }
+      finally {
+        // springet må aldrig blive hængende i 'clipping' (så låser det bufferen)
+        s.state = 'done';
+        const open = springs.filter((x) => x.state !== 'done');
+        lockFrom = open.length ? Math.min(...open.map((x) => x.start - 1.5)) : null;
+        springs = springs.filter((x) => x.state !== 'done');
       }
-    } catch (e) { console.warn('klip fejlede', e); }
-    s.state = 'done';
-    const open = springs.filter((x) => x.state !== 'done');
-    lockFrom = open.length ? Math.min(...open.map((x) => x.start - 1.5)) : null;
-    springs = springs.filter((x) => x.state !== 'done');
-  }
-  clipBusy = false;
+    }
+  } finally { clipBusy = false; }
 }
 function pickMime() {
   if (!window.MediaRecorder) return '';
@@ -1138,11 +1215,12 @@ async function makeClip(s, frames) {
     await stopped;
     st.getTracks().forEach((tr) => tr.stop());
     const blob = new Blob(parts, { type: mime.split(';')[0] });
-    if (blob.size > 1000) { const c = { ...base, blob, mime: blob.type }; await putClip(c); refreshLists(); cloudUpload(c); return; }
+    if (blob.size > 1000) { const c = { ...base, blob, mime: blob.type }; await putClip(c); refreshLists(); setRec(); cloudUpload(c); return true; }
   }
   // reserve: gem billederne og afspil dem i et canvas
   await putClip({ ...base, frames: frames.map((f) => ({ t: f.t - frames[0].t, blob: f.blob })) });
-  refreshLists();
+  refreshLists(); setRec();
+  return true;
 }
 async function thumbOf(blob) {
   const bmp = await createImageBitmap(blob);
@@ -1551,7 +1629,8 @@ async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.m
   const blob = new Blob(parts, { type: mime.split(';')[0] });
   if (blob.size < 1000) return;
   const c = { id: `${id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
-  await putClip(c); refreshLists(); setRec();
+  try { await putClip(c); } catch (e) { console.warn('holdomgang kunne ikke gemmes', e); toast(saveErrMsg(e)); return; }
+  refreshLists(); setRec();
   toast(no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
   cloudUpload(c);
 }
@@ -1646,6 +1725,7 @@ $('cmpClose').onclick = () => {
 let view = 'live', trainerOk = false, mineG = null, idleT = null;
 $('tabs').onclick = (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.v); };
 function show(v) {
+  disarmAll();
   if (document.body.classList.contains('gymnast')) v = 'mine';
   view = v;
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.v === v);
@@ -1762,11 +1842,11 @@ async function renderClips() {
     <p class="muted">${list.length} klip${cloudTrainer ? ` · ${list.filter((c) => !c.remote).length} på denne enhed · ${list.filter((c) => c.cloud).length} i skyen` : ' på denne enhed · log ind i skyen under Opsætning for at se klip fra andre enheder'}. Klip med orange kant mangler et nummer.</p>
     ${shown.length ? `<div class="grid">${shown.map((c) => `
       <div class="clip${c.g ? '' : ' unk'}">
-        <button class="thumb" data-play="${c.id}" style="background-image:url('${c.thumb}')" aria-label="Afspil"><span>${c.dur} s</span></button>
+        <button class="thumb" data-play="${esc(c.id)}"${thumbCss(c.thumb)} aria-label="Afspil"><span>${num(c.dur)} s</span></button>
         <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b>
-          ${!c.g && c.tag ? `<span class="muted" style="font-size:14px">Skilt ${c.tag}</span>` : ''}
-          <select data-g="${c.id}" aria-label="Gymnast">${opts(c.g)}</select>
-          <button class="bad ghost" data-del="${c.id}">Slet</button></div></div>`).join('')}</div>`
+          ${!c.g && c.tag ? `<span class="muted" style="font-size:14px">Skilt ${esc(c.tag)}</span>` : ''}
+          <select data-g="${esc(c.id)}" aria-label="Gymnast">${opts(c.g)}</select>
+          <button class="bad ghost" data-del="${esc(c.id)}">Slet</button></div></div>`).join('')}</div>`
       : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
   if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
@@ -1785,8 +1865,7 @@ async function renderClips() {
     await setClipG(s.dataset.g, +s.value); renderClips();
   }));
   w.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
-    if (b.dataset.sure) { await delAny(b.dataset.del); renderClips(); }
-    else { b.dataset.sure = '1'; b.textContent = 'Tryk igen for at slette'; }
+    if (confirm2(b, 'Tryk igen for at slette')) { await delAny(b.dataset.del); renderClips(); }
   }));
 }
 
@@ -1794,12 +1873,14 @@ let mineData = null; // { n, name, clips:[{id,at,dur,thumb,url}] } fra skyen
 // Hurtig tildeling: ét ukendt klip ad gangen, tryk på gymnastens nummer.
 let asUrl = null, assigning = false;
 async function setClipG(id, g) {
-  const c = await getClip(id);
-  if (c) { c.g = g; await putClip(c); }
+  let c = null;
+  try { c = await getClip(id); if (c) { c.g = g; await putClip(c); } }
+  catch (e) { console.warn('kunne ikke gemme', e); toast(saveErrMsg(e)); return false; }
   if (cloudTrainer && (c?.cloud || remoteCache.has(id))) {
     const { error } = await sb.from('clips').update({ g }).eq('id', id);
     if (error) toast('Kunne ikke rette i skyen'); else if (remoteCache.has(id)) remoteCache.get(id).g = g;
   }
+  return true;
 }
 async function renderAssign(skip) {
   assigning = true;
@@ -1814,10 +1895,10 @@ async function renderAssign(skip) {
   const c = await getAny(unk[skip].id);
   const named = S.roster.filter((g) => g.name);
   const list = named.length ? named : S.roster;
-  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + c.tag : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
+  w.innerHTML = `<div class="row"><h2 style="flex:1">Hvem springer? <span class="muted" style="font-size:16px;font-weight:500">${skip + 1} af ${unk.length}${c.tag ? ' · Skilt ' + esc(c.tag) : ''}${c.d ? ' · ' + esc(c.d) : ''} · ${esc(fmtTime(c.at))}</span></h2>
       <button id="asDone">Færdig</button></div>
     <div style="background:#000;border-radius:12px;overflow:hidden;max-height:52vh;display:grid;place-items:center">
-      ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${c.thumb}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
+      ${c.blob || c.url ? '<video id="asV" playsinline muted autoplay loop style="width:100%;max-height:52vh;object-fit:contain"></video>' : `<img src="${safeThumb(c.thumb)}" alt="" style="width:100%;max-height:52vh;object-fit:contain">`}
     </div>
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr));margin-top:12px">
       ${list.map((g) => `<button data-as="${g.n}" style="min-height:64px;display:grid;gap:2px"><b style="font-size:24px">${g.n}</b>${g.name ? `<span style="font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</span>` : ''}</button>`).join('')}
@@ -1825,11 +1906,11 @@ async function renderAssign(skip) {
     <div class="row" style="margin-top:12px"><button id="asSkip">Spring over</button><button id="asSlow" class="ghost">Slowmotion</button><button id="asDel" class="bad ghost">Slet klip (ikke et spring)</button></div>`;
   if (c.blob || c.url) { const v = $('asV'); if (c.blob) { asUrl = URL.createObjectURL(c.blob); v.src = asUrl; } else { v.src = c.url; remoteBlobUrl(c).then((u) => { if (u && u !== c.url && $('asV') === v) { const t = v.currentTime, r = v.playbackRate; v.src = u; v.addEventListener('loadedmetadata', () => { v.currentTime = t; v.playbackRate = r; v.play().catch(() => {}); }, { once: true }); } }); } v.play().catch(() => {}); $('asSlow').onclick = () => { v.playbackRate = v.playbackRate === 1 ? 0.4 : 1; $('asSlow').textContent = v.playbackRate === 1 ? 'Slowmotion' : 'Normal fart'; }; }
   else $('asSlow').hidden = true;
-  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { await setClipG(c.id, +b.dataset.as); toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
+  w.querySelectorAll('[data-as]').forEach((b) => (b.onclick = async () => { if (!(await setClipG(c.id, +b.dataset.as))) return; toast(`Gemt: ${gName(+b.dataset.as)}`); renderAssign(skip); }));
   $('asSkip').onclick = () => renderAssign(skip + 1);
   $('asDone').onclick = () => { if (asUrl) { URL.revokeObjectURL(asUrl); asUrl = null; } renderClips(); };
   $('asDel').onclick = async (e) => {
-    if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
+    if (!confirm2(e.target, 'Tryk igen for at slette')) return;
     await delAny(c.id);
     renderAssign(skip);
   };
@@ -1841,29 +1922,35 @@ async function renderMine() {
   if (!mineG) {
     w.innerHTML = `<form class="pin" id="mineF"><h2>Mine spring</h2>
       <p class="muted">Skriv din personlige kode (6 tegn). Du kan kun se dine egne spring.</p>
-      <input id="mineIn" type="text" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="6" aria-label="Personlig kode">
-      <button class="acc" id="mineGo">Vis mine spring</button><p class="err" id="mineErr"></p>
+      <input id="mineIn" type="text" autocapitalize="characters" autocomplete="off" spellcheck="false" aria-label="Personlig kode">
+      <button class="acc" id="mineGo">Vis mine spring</button><p class="err" id="mineErr"></p><button type="submit" id="mineRetry" hidden>Prøv igen</button>
       ${document.body.classList.contains('gymnast') ? '<p class="muted" style="font-size:14px;margin-top:18px">Træner? <a href="./" id="toTrainer" style="color:var(--acc)">Gå til trænersiden</a></p>' : ''}</form>`;
     if ($('toTrainer')) $('toTrainer').onclick = (e) => { e.preventDefault(); location.hash = ''; document.body.classList.remove('gymnast'); history.replaceState(null, '', location.pathname); show('live'); };
     $('mineF').onsubmit = async (e) => {
       e.preventDefault();
-      const code = $('mineIn').value.trim().toUpperCase();
-      $('mineErr').textContent = '';
+      // mellemrum og bindestreger (fx "ab 100" eller kopieret med mellemrum) fjernes i stedet for at afkorte koden
+      const code = $('mineIn').value.replace(/[\s-]+/g, '').toUpperCase();
+      $('mineIn').value = code;
+      $('mineErr').textContent = ''; $('mineRetry').hidden = true;
       if (code.length !== 6) { $('mineErr').textContent = 'Koden har 6 tegn.'; return; }
       $('mineGo').disabled = true; $('mineGo').textContent = 'Henter …';
-      let res = null;
+      let res = null, netErr = null;
       if (sb) {
+        const ac = new AbortController(), to = setTimeout(() => ac.abort(), 15000);
         try {
-          const r = await fetch(`${SUPA_URL}/functions/v1/mine`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPA_KEY }, body: JSON.stringify({ code }) });
+          const r = await fetch(`${SUPA_URL}/functions/v1/mine`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPA_KEY }, body: JSON.stringify({ code }), signal: ac.signal });
           if (r.status === 429) { $('mineErr').textContent = 'For mange forkerte forsøg. Prøv igen om et kvarter.'; }
           else if (r.ok) res = await r.json();
-        } catch {}
+          else if (r.status >= 500 || r.status === 408) netErr = NET_DOWN; // serverfejl, ikke en forkert kode
+        } catch (e) { netErr = netMsg(e) || NET_DOWN; }
+        finally { clearTimeout(to); }
       }
       if (!res) {
         const g = S.roster.find((x) => x.code === code);
         if (g) res = { n: g.n, name: g.name, local: true };
       }
       $('mineGo').disabled = false; $('mineGo').textContent = 'Vis mine spring';
+      if (!res && netErr) { $('mineErr').textContent = netErr; $('mineRetry').hidden = false; return; }
       if (!res) { if (!$('mineErr').textContent) $('mineErr').textContent = 'Koden passer ikke. Spørg din træner.'; return; }
       mineData = res; mineG = res.n; renderMine();
     };
@@ -1874,7 +1961,7 @@ async function renderMine() {
   const title = mineData?.name || S.roster.find((x) => x.n === mineG)?.name || 'Nr. ' + mineG;
   w.innerHTML = `<div class="row"><h2 style="flex:1">${esc(title)}: ${list.length} spring</h2>${list.length > 1 ? `<button id="cmpBtn" class="${cmpPick ? 'on' : ''}">${cmpPick ? 'Vælg 2 klip …' : 'Sammenlign'}</button>` : ''}<button class="acc" id="mineOut">Log ud</button></div>
     <p class="muted">Klippene bliver slettet efter ${S.keepDays} dage. Tryk på et klip for at se det, og brug Slowmotion for at se detaljerne.</p>
-    ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}" style="background-image:url('${c.thumb || ''}')" aria-label="Afspil"><span>${c.dur} s</span></button>
+    ${list.length ? `<div class="grid">${list.map((c, i) => `<div class="clip"><button class="thumb" data-i="${i}"${thumbCss(c.thumb)} aria-label="Afspil"><span>${num(c.dur)} s</span></button>
       <div class="meta"><b>${esc(fmtTime(c.at))}${c.d ? ` · ${esc(c.d)}` : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Ingen spring endnu. Dine spring kommer her, når træneren har sat dit nummer på dem.</div>'}`;
   $('mineOut').onclick = () => { mineG = null; mineData = null; renderMine(); };
   if ($('cmpBtn')) $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; clearTimeout(idleT); renderMine(); };
@@ -1930,7 +2017,7 @@ function renderSetup() {
   w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudName(g); }));
   // Ny kode kræver to tryk, fordi den gamle kode holder op med at virke
   w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = async () => {
-    if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = 'Sikker? Tryk igen'; b.classList.add('bad'); setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = 'Ny kode'; b.classList.remove('bad'); } }, 4000); return; }
+    if (!confirm2(b, 'Sikker? Tryk igen', 'bad')) return;
     const g = S.roster.find((x) => x.n === +b.dataset.new);
     if (cloudTrainer) { const c = await cloudNewCode(g.n); if (!c) return; g.code = c; } else g.code = newCode();
     save(); renderSetup(); toast(`Ny kode til ${gName(g.n)}. Den gamle virker ikke længere.`);
@@ -1958,9 +2045,9 @@ function renderSetup() {
   $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
   $('wipe').onclick = async (e) => {
     const b = e.target;
-    if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = 'Tryk igen for at slette alle klip'; return; }
+    if (!confirm2(b, 'Tryk igen for at slette alle klip')) return;
     for (const c of await listClips()) await delClip(c.id);
-    b.textContent = 'Alle klip er slettet'; delete b.dataset.sure;
+    b.textContent = 'Alle klip er slettet'; setRec();
   };
   $('testFile').onchange = (e) => { const f = e.target.files[0]; if (f) { show('live'); startCamera(f); } };
   $('newPin').onclick = () => { S.trainerHash = ''; save(); trainerOk = false; trainerPin = null; renderSetup(); };
@@ -1971,18 +2058,41 @@ function renderSetup() {
 const SUPA_URL = 'https://njunnxxyidmycxgspybd.supabase.co';
 const SUPA_KEY = 'sb_publishable_z_WF_jwdJPo0_G_gaenMvg_YcBs8GEx';
 let sb = null, cloudUser = null, cloudTrainer = false, cloudBusy = false;
+// Netværks- og serverfejl må ikke ligne et afslag ("forkert kode", "ikke godkendt").
+const NET_OFF = 'Ingen forbindelse til internettet. Tjek wifi og prøv igen.';
+const NET_DOWN = 'Serveren svarer ikke lige nu. Prøv igen om lidt.';
+function netMsg(e, status) {
+  const st = num(status ?? e?.status);
+  if (!navigator.onLine) return NET_OFF;
+  if (st >= 500 || st === 408) return NET_DOWN;
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError' || e?.name === 'AuthUnknownError') return NET_DOWN;
+  if (e && (e.name === 'AuthRetryableFetchError' || e.name === 'TypeError' || /failed to fetch|fetch failed|networkerror|network request|load failed|internet/i.test(String(e.message || '')))) return st ? NET_DOWN : NET_OFF;
+  return null;
+}
+let cloudNet = null, cloudTry = 0, cloudRetryT = null; // netværksfejl ved tjek af trænerkontoen: prøv igen af sig selv
 try { sb = window.supabase.createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: true, autoRefreshToken: true } }); } catch { sb = null; }
 async function cloudCheck() {
   if (!sb) return;
+  clearTimeout(cloudRetryT);
+  let nm = null;
   try {
-    const { data } = await sb.auth.getSession();
-    cloudUser = data.session?.user || null;
-    cloudTrainer = false;
-    if (cloudUser) {
-      const { data: t } = await sb.from('trainers').select('user_id').eq('user_id', cloudUser.id).maybeSingle();
-      cloudTrainer = !!t;
+    const { data, error: se } = await sb.auth.getSession();
+    nm = se ? netMsg(se) : null;
+    if (!nm) {
+      cloudUser = data?.session?.user || null;
+      if (!cloudUser) cloudTrainer = false;
+      else {
+        const r = await sb.from('trainers').select('user_id').eq('user_id', cloudUser.id).maybeSingle();
+        nm = r.error ? netMsg(r.error, r.status) || (r.status ? null : NET_OFF) : null;
+        if (!nm) cloudTrainer = !!r.data; // ved netværksfejl beholdes det, vi vidste i forvejen
+      }
     }
-  } catch {}
+  } catch (e) { nm = netMsg(e) || NET_DOWN; }
+  const changed = cloudNet !== nm;
+  cloudNet = nm;
+  if (changed && !(view === 'setup' && trainerOk)) renderCloud(); // fx login-boksen på kodeskærmen
+  if (nm) cloudRetryT = setTimeout(cloudCheck, Math.min(60000, 2000 * 2 ** cloudTry++)); // 2, 4, 8 … 60 s
+  else cloudTry = 0;
   if (view === 'setup' && trainerOk) renderCloud();
   if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
   if (cloudTrainer) { cloudRetry(); cloudPrune(); rosterPull(); }
@@ -2006,7 +2116,7 @@ async function rosterPull() {
     data.push(...again.data);
   }
   const before = JSON.stringify(S.roster);
-  S.roster = data.map((r) => ({ n: r.n, name: r.name || '', code: r.code || '' }));
+  S.roster = data.filter((r) => r && num(r.n) > 0).map((r) => ({ n: num(r.n), name: String(r.name || ''), code: String(r.code || '') }));
   S.rosterLinked = true; save();
   if (JSON.stringify(S.roster) !== before && view === 'setup' && trainerOk) renderSetup();
   return true;
@@ -2058,6 +2168,12 @@ function renderCloud() {
   const el = $('cloudSec');
   if (!el) return;
   if (!sb) { el.innerHTML = '<h3>Skyen</h3><p class="muted">Forbindelsen til skyen kunne ikke startes.</p>'; return; }
+  if (cloudNet && !cloudTrainer) {
+    el.innerHTML = `<h3>Skyen</h3><p class="muted">${esc(cloudNet)} Siden prøver igen af sig selv.</p>
+       <div class="row"><button id="cAgain">Prøv igen</button></div>`;
+    $('cAgain').onclick = () => { cloudTry = 0; cloudCheck(); };
+    return;
+  }
   if (!cloudUser) {
     el.innerHTML = `<h3>Skyen: så gymnasterne kan se deres spring hjemme</h3>
       <p class="muted">Log ind med trænerlogin. Så bliver hvert klip sendt op automatisk, og gymnasterne kan se deres egne på <b>williamamaru.github.io/springklip/#mine</b> med deres kode.</p>
@@ -2070,7 +2186,11 @@ function renderCloud() {
       const email = $('cEmail').value.trim(), password = $('cPass').value;
       if (!email || password.length < 8) { $('cErr').textContent = 'Skriv e-mail og en adgangskode på mindst 8 tegn.'; return; }
       $('cErr').textContent = 'Et øjeblik …';
-      const r = signup ? await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }) : await sb.auth.signInWithPassword({ email, password });
+      let r;
+      try { r = signup ? await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }) : await sb.auth.signInWithPassword({ email, password }); }
+      catch (e) { r = { error: e }; }
+      const nm = r.error && netMsg(r.error);
+      if (nm) { $('cErr').textContent = nm; return; }
       if (r.error) { $('cErr').textContent = signup ? 'Kunne ikke oprette: ' + r.error.message : 'Forkert e-mail eller adgangskode (eller e-mailen er ikke bekræftet endnu).'; return; }
       if (signup && !r.data.session) { $('cErr').textContent = 'Tjek din e-mail og tryk på linket for at bekræfte. Log derefter ind her.'; return; }
       cloudCheck();
@@ -2089,6 +2209,7 @@ function renderCloud() {
   if ($('cAgain')) $('cAgain').onclick = cloudCheck;
   if ($('cSync')) $('cSync').onclick = async () => { $('cMsg').textContent = 'Henter og sender …'; await rosterPull(); await cloudRetry(); $('cMsg').textContent = 'Færdig.'; };
 }
+addEventListener('online', () => { if (cloudNet) { cloudTry = 0; cloudCheck(); } });
 if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
 
 let lockT = null;
@@ -2097,7 +2218,7 @@ document.addEventListener('pointerdown', () => { clearTimeout(lockT); lockT = se
 // ---------- Status ----------
 let toastT = null;
 function toast(msg) {
-  const t = $('toast'); t.textContent = msg; t.hidden = false;
+  const t = $('toast'); t.hidden = false; t.textContent = msg; // synlig før teksten skiftes, så skærmlæsere læser den op
   clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), 3500);
 }
 let todayCount = 0;
@@ -2122,6 +2243,8 @@ if (location.hash === '#mine') {
   document.body.classList.add('gymnast');
   show('mine');
 }
+// skift mellem #mine og trænersiden i samme fane (fx ved at rette adressen): indlæs siden forfra i den rigtige tilstand
+addEventListener('hashchange', () => { if ((location.hash === '#mine') !== document.body.classList.contains('gymnast')) location.reload(); });
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
 const APP_VERSION = '20261126134819';
@@ -2289,7 +2412,7 @@ async function makeClip264(s, a, b) {
   const thumb = await thumb264(ch, mid < 0 ? ch.length >> 1 : mid);
   const dur = ch[ch.length - 1].t - t0;
   const c = { id: s.id, d: s.d, at: s.wall, g: s.g || 0, tag: s.tag ?? null, dur: Math.round(dur * 10) / 10, thumb, blob, mime: 'video/mp4' };
-  await putClip(c); refreshLists(); cloudUpload(c);
+  await putClip(c); refreshLists(); setRec(); cloudUpload(c);
   return true;
 }
 async function thumb264(ch, upto) {

@@ -104,12 +104,14 @@ main{min-height:0;overflow:hidden;position:relative}
 .stage{position:relative;background:var(--stage);min-height:0}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
 #screen{position:absolute;inset:0;width:100%;height:100%;touch-action:none;z-index:1}
-.startbox,.zonehelp,.toast,.drag{z-index:3}
-/* meddelelse over videoen: lys flade, mørk tekst – læsbar på afstand, ingen blur */
-.toast{position:absolute;top:var(--s3);right:var(--s3);max-width:min(60%,520px);padding:10px var(--s4);border-radius:var(--r-ctl);
-  background:var(--ink);color:#15191d;font-size:var(--fs-l);font-weight:700;line-height:1.25;box-shadow:var(--shadow);animation:in var(--t)}
-/* under holdomgang tegnes et rødt mærke øverst i billedet: læg meddelelser under det */
-#live:has(#holdBtn.rec) .toast{top:56px}
+.startbox,.zonehelp,.drag{z-index:3}
+/* meddelelse: ligger i body over alle sider, afspiller og dialoger (z-index over .modal og opdateringsknappen).
+   Grafitgrå flade med orange kant – læsbar på afstand over video, ingen blur. Tager ikke imod tryk. */
+.toast{position:fixed;top:calc(env(safe-area-inset-top) + 68px);right:var(--s3);z-index:40;max-width:min(60%,520px);padding:10px var(--s4);border-radius:var(--r-ctl);
+  background:var(--raise-2);color:var(--ink);border:1px solid var(--line-2);border-left:4px solid var(--acc);
+  font-size:var(--fs-l);font-weight:700;line-height:1.25;box-shadow:var(--shadow);pointer-events:none;animation:in var(--t)}
+/* under holdomgang tegnes et rødt mærke øverst i live-billedet: læg meddelelser under det */
+body:has(#holdBtn.rec):has(#live:not([hidden])) .toast{top:calc(env(safe-area-inset-top) + 112px)}
 @keyframes in{from{opacity:0;transform:translateY(-4px)}}
 .drag{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgb(0 0 0 / .82);color:#fff;border-radius:var(--r-box);padding:var(--s3) var(--s5);font-size:var(--fs-xxl);font-weight:800;font-variant-numeric:tabular-nums;pointer-events:none;z-index:2;text-align:center}
 .drag small{display:block;font-size:var(--fs-xs);font-weight:500;color:var(--muted)}
@@ -272,7 +274,8 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
   .bar.open .grp.more .meter{display:none}
   .startbox{padding:var(--s3)}
   .startbox .card{padding:var(--s5)}
-  .toast{left:var(--s3);max-width:none;font-size:var(--fs-m)}
+  .toast{top:calc(env(safe-area-inset-top) + 88px);left:var(--s3);max-width:none;font-size:var(--fs-m)}
+  body:has(#holdBtn.rec):has(#live:not([hidden])) .toast{top:calc(env(safe-area-inset-top) + 132px)}
   .zonehelp{bottom:var(--s2);width:calc(100% - 16px);padding:var(--s3)}
   .zonehelp #zoneTxt{font-size:var(--fs-xs)}
   .zonehelp #zoneName{flex:1 1 100%}
@@ -324,7 +327,6 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
     <div class="stage" id="stage">
       <video id="cam" playsinline muted autoplay></video>
       <canvas id="screen"></canvas>
-      <div class="toast" id="toast" hidden></div>
       <div class="drag" id="dragBox" hidden></div>
       <div class="zonehelp" id="zoneHelp" hidden>
         <div class="grp seg" id="zoneKind" role="group" aria-label="Felttype"><button data-k="air" class="on">Luftfelt</button><button data-k="lane">Bane</button></div>
@@ -451,6 +453,8 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
     <button id="cmpOffM">−0,1 s</button><b id="cmpOff">0,0 s</b><button id="cmpOffP">+0,1 s</button>
   </div>
 </div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="lib/supabase.js?v=2.119.0"></script>
 <script src="lib/mp4-muxer.js?v=5.2.2"></script>
