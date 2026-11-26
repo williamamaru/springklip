@@ -1051,7 +1051,7 @@ function ciOpen() {
   if (!running) { toast('Start kameraet først'); return; }
   if (!worker) { toast('Skilte kan ikke læses i denne browser'); return; }
   ciData();
-  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = ''; ci.multi = false; ci.multiN = 0; ci.multiIds = ''; ci.camReady = false; ci.lastRead = now();
+  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; disarm($('ciNew')); ci.note = ''; ci.multi = false; ci.multiN = 0; ci.multiIds = ''; ci.camReady = false; ci.lastRead = now();
   active = null; motAbove = 0;
   // et spring, der stadig læser nummer, afgøres nu, så det ikke optager læsningerne under indtjekningen
   springs.filter((x) => x.state === 'reading').forEach(finishSpring);
@@ -1122,7 +1122,6 @@ function ciRender() {
   $('ciLock').textContent = locked ? 'Lås op' : 'Lås indtjekning';
   $('ciLockTxt').textContent = locked ? '🔒 Låst' : '';
   $('ciNew').hidden = locked;
-  if (!ci.sure) $('ciNew').textContent = 'Ny træning';
   const msg = $('ciMsg'), names = $('ciNames'), pin = $('ciPin');
   names.innerHTML = ''; pin.hidden = ci.state !== 'pin'; $('ciCam').hidden = ci.state === 'pin';
   if (ci.state !== 'pin') pin.innerHTML = '';
@@ -1168,8 +1167,8 @@ $('ciLock').onclick = () => {
 };
 $('ciNew').onclick = () => {
   if (ciData().locked) return;
-  if (!ci.sure) { ci.sure = true; $('ciNew').textContent = 'Tryk igen: slet dagens indtjekning'; setTimeout(() => { ci.sure = false; ciRender(); }, 4000); return; }
-  ci.sure = false; S.checkin = { day: dayKey(), map: {}, locked: false }; save(); ci.state = 'scan'; ciRender(); toast('Ny træning: indtjekningen er nulstillet');
+  if (!confirm2($('ciNew'), 'Tryk igen: slet dagens indtjekning')) return;
+  S.checkin = { day: dayKey(), map: {}, locked: false }; save(); ci.state = 'scan'; ciRender(); toast('Ny træning: indtjekningen er nulstillet');
 };
 syncCiBtn();
 
@@ -1703,7 +1702,9 @@ function holdStart() {
   hold.out = hold.cv ? st : null;
   hold.on = true; hold.id0 = Date.now(); hold.t0 = Date.now(); hold.no = 0; hold.mime = mime; hold.thumb = camThumb();
   holdPart(st);
-  clearInterval(hold.timer); hold.timer = setInterval(holdUI, 1000); holdUI();
+  clearInterval(hold.timer); hold.tick = 0;
+  // mp4 afleverer først data ved stop/requestData: hent hvert 2. sekund, så en lukket side kun mister få sekunder
+  hold.timer = setInterval(() => { holdUI(); if (++hold.tick % 2 === 0) try { if (hold.rec && hold.rec.state === 'recording') hold.rec.requestData(); } catch {} }, 1000); holdUI();
   toast('Holdomgang optages. Tryk igen for at stoppe.');
 }
 function holdPart(st) {
@@ -1711,14 +1712,57 @@ function holdPart(st) {
   let rec;
   try { rec = new MediaRecorder(st, { mimeType: hold.mime, videoBitsPerSecond: HOLD_BPS }); }
   catch (e) { hold.on = false; holdFree(); holdUI(); toast('Holdomgang kunne ikke startes'); return; }
-  rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
   const id0 = hold.id0, mime = hold.mime, th1 = hold.thumb; // låses her: onstop kommer først, efter en evt. ny holdomgang er startet
-  rec.onstop = () => holdSave(no, at, Date.now(), parts, no === 1 ? th1 : camThumb(), id0, mime);
+  const th = no === 1 ? th1 : camThumb();
+  let seq = 0;
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) { parts.push(e.data); holdChPut({ k: `${id0}|${no}|${String(seq++).padStart(5, '0')}`, id0, no, at, mime, th: seq === 1 ? th : undefined, t: Date.now(), b: e.data }); } };
+  rec.onstop = () => holdSave(no, at, Date.now(), parts, th, id0, mime);
   rec.start(1000);
   hold.rec = rec;
   clearTimeout(hold.cut);
   hold.cut = setTimeout(() => { if (hold.on && hold.rec === rec) { rec.stop(); holdPart(st); } }, HOLD_PART * 1000);
 }
+// siden lukkes/genindlæses/skjules midt i en holdomgang: afslut og gem den aktuelle del nu, så højst et par sekunder går tabt
+// Ved genindlæsning/lukning når en IndexedDB-skrivning af hele klippet ikke at blive færdig. Derfor gemmes hvert modtaget stykke (hvert 2. sekund)
+// løbende i en lille egen database, og ved næste start samles de til et klip (holdRecover). Højst et par sekunder går tabt.
+let holdDbP;
+function holdChDb() {
+  return holdDbP || (holdDbP = new Promise((res, rej) => {
+    const r = indexedDB.open('springklip-hold', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('ch', { keyPath: 'k' });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+}
+async function holdChPut(rec) { try { const d = await holdChDb(); d.transaction('ch', 'readwrite').objectStore('ch').put(rec); } catch {} }
+async function holdChDel(id0, no) {
+  try { const d = await holdChDb(), pre = `${id0}|${no}|`; d.transaction('ch', 'readwrite').objectStore('ch').delete(IDBKeyRange.bound(pre, pre + '\uffff')); } catch {}
+}
+async function holdRecover() {
+  try {
+    const d = await holdChDb();
+    const all = await new Promise((res, rej) => { const q = d.transaction('ch').objectStore('ch').getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    const g = new Map();
+    for (const r of all) { const k = `${r.id0}|${r.no}`; (g.get(k) || g.set(k, []).get(k)).push(r); }
+    for (const rs of g.values()) {
+      rs.sort((a, b) => (a.k < b.k ? -1 : 1));
+      const last = Math.max(...rs.map((r) => r.t));
+      if (Date.now() - last < 4000) continue; // en optagelse i en anden fane skriver stadig
+      const f = rs[0];
+      if (await getClip(`${f.id0}-hold${f.no}`).catch(() => 0)) { holdChDel(f.id0, f.no); continue; } // allerede gemt fuldt
+      await holdSave(f.no, f.at, last, rs.map((r) => r.b), (rs.find((r) => r.th) || {}).th || '', f.id0, f.mime);
+    }
+  } catch (e) { console.warn('holdRecover', e); }
+}
+setTimeout(holdRecover, 3000);
+setTimeout(holdRecover, 12000);
+function holdFlush() {
+  if (hold.on) { try { if (hold.rec && hold.rec.state === 'recording') hold.rec.requestData(); } catch {} holdStop(); hold.flushed = true; }
+}
+addEventListener('pagehide', holdFlush);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') holdFlush();
+  else if (hold.flushed) { hold.flushed = false; toast('Holdomgangen blev afsluttet og gemt, da siden blev skjult'); }
+});
 function holdStop() {
   if (!hold.on) return;
   hold.on = false; clearTimeout(hold.cut); clearInterval(hold.timer);
@@ -1728,9 +1772,10 @@ function holdStop() {
 }
 async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.mime) {
   const blob = new Blob(parts, { type: mime.split(';')[0] });
-  if (blob.size < 1000) return;
+  if (blob.size < 1000) { holdChDel(id0, no); return; }
   const c = { id: `${id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
   try { await putClip(c); } catch (e) { console.warn('holdomgang kunne ikke gemmes', e); toast(saveErrMsg(e)); return; }
+  holdChDel(id0, no);
   refreshLists(); setRec();
   toast(no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
   cloudUpload(c);
@@ -2265,7 +2310,8 @@ function renderSetup() {
       <div class="seg" id="engSeg" role="group" aria-label="Motor"><button data-e="jpeg">Standard</button><button data-e="h264">Ny (H.264, prøve)</button></div>
       <p class="muted help">Den nye motor lader iPad'ens videochip komprimere og afspille billederne. Det burde hakke mindre og bruge mindre hukommelse. Siden genindlæses, når du skifter, og kameraet skal startes igen.</p>
       <div class="row" id="engAsk" hidden><span id="engAskTxt"></span><button class="acc" id="engYes">Skift og genindlæs</button><button id="engNo">Annullér</button></div>
-    </details></div>`;
+    </details></div>
+    <p class="muted" style="margin-top:var(--s5);font-size:12px">Version ${esc(APP_VERSION)}</p>`;
   $('setLock').onclick = () => lockTrainer(true);
   $('adv').ontoggle = () => { advOpen = $('adv').open; };
   w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudName(g); }));
@@ -2540,6 +2586,32 @@ if (location.hash === '#mine') {
 }
 // skift mellem #mine og trænersiden i samme fane (fx ved at rette adressen): indlæs siden forfra i den rigtige tilstand
 addEventListener('hashchange', () => { if ((location.hash === '#mine') !== document.body.classList.contains('gymnast')) location.reload(); });
+
+// Flere faner: skriver en anden fane opsætningen, læses de ændrede felter ind her, så denne fane ikke overskriver dem senere
+addEventListener('storage', (e) => {
+  if (e.key !== KEY || !e.newValue) return;
+  let o; try { o = JSON.parse(e.newValue); } catch { return; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return;
+  const own = new Set(['facing', 'engine']); // hører til den enkelte fane/enhed
+  const ch = [];
+  for (const k of Object.keys(o)) {
+    if (own.has(k) || JSON.stringify(o[k]) === JSON.stringify(S[k])) continue;
+    if (k === 'roster' && !Array.isArray(o[k])) continue;
+    if (k === 'presets' && !(Array.isArray(o[k]) && o[k].length)) continue;
+    if (k === 'checkin' && o[k] && (typeof o[k] !== 'object' || !o[k].map || typeof o[k].map !== 'object')) continue;
+    S[k] = o[k]; ch.push(k);
+  }
+  if (!ch.length) return;
+  if (!(Number.isInteger(S.pi) && S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
+  try {
+    if (ch.some((k) => k === 'presets' || k === 'pi')) syncPresetUI();
+    if (ch.some((k) => k === 'delay' || k === 'delays')) syncDelayUI();
+    if (ch.includes('checkin')) { syncCiBtn(); ciRender(); }
+    const a = document.activeElement;
+    if (ch.some((k) => k === 'roster' || k === 'keepDays' || k === 'sens') && trainerOk && $('setupWrap').querySelector('#sens') && !(a && a.closest && a.closest('#setupWrap') && /INPUT/.test(a.tagName))) renderSetup();
+  } catch {}
+  toast('Opdateret fra en anden fane');
+});
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
 const APP_VERSION = '20261126230740';
