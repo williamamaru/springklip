@@ -169,7 +169,7 @@ function capLoop() {
     // kameraets eget tidsstempel giver jævne afstande mellem billederne (glattere afspilning)
     const mt = meta && (meta.captureTime || meta.expectedDisplayTime);
     const t = mt ? mt / 1000 : now();
-    if (t - lastCap >= 1 / 31 && cam.readyState >= 2) {
+    if ((t - lastCap >= 1 / 31 || t < lastCap - 1) && cam.readyState >= 2) { // tid der går baglæns = nyt ur
       lastCap = t;
       onFrame(t);
     }
@@ -383,7 +383,10 @@ $('flipBtn').classList.toggle('on', S.flip);
 const camGet = (facing, exact) => navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: exact ? { exact: facing } : facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
 async function camUse(ns) {
   stream.getTracks().forEach((t) => t.stop());
-  stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null; capLoop();
+  stream = ns; cam.srcObject = ns; await cam.play(); prevMot = null;
+  // nyt kamera kan have et andet ur i tidsstemplerne, og en læsning af det gamle billede kan hænge: start forfra
+  lastCap = -1e9; lastTag = -1e9; tagBusy = false; tagReq = null; ci.multiN = 0;
+  capLoop();
 }
 $('camSwitch').onclick = async () => {
   // sidder frontkameraet fast efter indtjekningen, prøves tilbageskiftet igen (S.facing er uændret)
@@ -778,12 +781,15 @@ function newSpring(start, end, opt = {}) {
 }
 
 // ---------- Nummerskilte ----------
-let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring';
-try { worker = new Worker('worker.js?v=20261126000732'); } catch { worker = null; }
+let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring', tagReq = null, tagSent = 0;
+try { worker = new Worker('worker.js?v=20261126130607'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
+if (worker) worker.onerror = () => { tagBusy = false; tagReq = null; };
 if (worker) worker.onmessage = (e) => {
-  tagBusy = false;
-  const { t, found } = e.data;
+  const { t, found, dim } = e.data;
+  if (tagKind === 'ci') ci.dim = `Kamera ${cam.videoWidth}x${cam.videoHeight}, læst ${dim || '?'}, fundet: ${found.map((f) => f.id + ':' + Math.round(f.size)).join(' ') || 'intet'}`;
+  if (t !== tagReq) return; // svar på en opgivet læsning (fx fra før kameraskiftet)
+  tagBusy = false; tagReq = null;
   if (tagKind === 'ci') { ciOnRead(found); return; }
   for (const s of springs) {
     if (s.state !== 'reading' || t < s.end - 0.2 || t > s.end + TAG_WINDOW) continue;
@@ -797,19 +803,22 @@ if (worker) worker.onmessage = (e) => {
 function maybeReadTags(t) {
   const reading = springs.filter((s) => s.state === 'reading');
   for (const s of reading) if (t > s.end + TAG_WINDOW) finishSpring(s);
+  if (tagBusy && now() - tagSent > 1.5) { tagBusy = false; tagReq = null; } // hængt billede/baggrundstråd: opgiv
   if (!worker || tagBusy) return;
-  const forSpring = springs.some((s) => s.state === 'reading' && t >= s.end - 0.2);
-  if (forSpring) { if (t - lastTag < 0.22) return; }
-  else if (!ciWantsRead() || t - lastTag < CI_READ_GAP) return; // indtjekning: ca. 4 læsninger/s
-  lastTag = t; tagKind = forSpring ? 'spring' : 'ci';
+  const forSpring = !ci.front && springs.some((s) => s.state === 'reading' && t >= s.end - 0.2);
+  // afstand mellem læsninger måles med sidens eget ur (kameraets tidsstempler kan skifte ur ved kameraskift)
+  const tn = now();
+  if (forSpring) { if (tn - lastTag < 0.22) return; }
+  else if (!ciWantsRead() || tn - lastTag < CI_READ_GAP) return; // indtjekning: ca. 4 læsninger/s
   const vw = cam.videoWidth, vh = cam.videoHeight;
   if (!vw) return;
+  lastTag = tn; tagKind = forSpring ? 'spring' : 'ci';
   // til indtjekning holdes skiltet tæt på, så et mindre billede er nok (sparer kræfter)
   const sc = Math.min(1, (forSpring ? 1920 : 960) / vw);
   const w = Math.round(vw * sc), h = Math.round(vh * sc);
-  tagBusy = true;
+  tagBusy = true; tagReq = t; tagSent = tn;
   if (typeof OffscreenCanvas !== 'undefined' && window.createImageBitmap) {
-    createImageBitmap(cam).then((bmp) => worker.postMessage({ w, h, bmp, t, maxId: tagMax(), ci: !forSpring }, [bmp])).catch(() => { tagBusy = false; });
+    createImageBitmap(cam).then((bmp) => { if (tagReq !== t) { bmp.close(); return; } worker.postMessage({ w, h, mw: forSpring ? 1920 : 960, bmp, t, maxId: tagMax(), ci: !forSpring }, [bmp]); }).catch(() => { if (tagReq === t) { tagBusy = false; tagReq = null; } });
     return;
   }
   if (tagC.width !== w) { tagC.width = w; tagC.height = h; }
@@ -877,16 +886,24 @@ function tagToG(tag) {
 const tagMax = () => (ciActive() || ci.open ? Math.max(30, S.roster.length) : S.roster.length);
 const ciName = (g) => { const r = S.roster.find((x) => x.n === g); return r && r.name ? r.name : `Nr. ${g}`; };
 const ciTagOf = (g) => { const m = ciData().map; const k = Object.keys(m).find((t) => +m[t] === g); return k ? +k : 0; };
-const ciWantsRead = () => ci.open && (ci.state === 'scan' || ci.state === 'done' || ci.state === 'locked');
+// læs først, når kameraskiftet er afgjort (ellers læses et øjeblik fra bagkameraet, der kan se noget helt andet)
+const ciWantsRead = () => ci.open && ci.camReady && (ci.state === 'scan' || ci.state === 'done' || ci.state === 'locked');
 function ciOnRead(found) {
   if (!ci.open) return;
   const t = now();
+  ci.lastRead = t;
+  const dimEl = document.querySelector('#ciMsg .ciDim');
+  if (dimEl) dimEl.textContent = ci.dim || ''; else if (ci.state === 'scan' && ci.dim) ciRender();
   const srt = found.slice().sort((a, b) => b.size - a.size);
   let f = srt[0] || null; // det største skilt i billedet
-  // to skilte af næsten samme størrelse (fx en hel PDF-side med to skilte): tæl ikke, bed om kun ét
-  const multi = !!(srt[1] && srt[1].size >= srt[0].size * 0.75);
-  if (multi !== ci.multi) { ci.multi = multi; if (ci.state === 'scan') ciRender(); }
-  if (multi) { ci.streak = { id: 0, n: 0 }; return; }
+  // to skilte af næsten samme størrelse (fx en hel PDF-side med to skilte): tæl ikke, bed om kun ét.
+  // Kræver 2 læsninger i træk, så et enkelt fejlfund ikke stopper indtjekningen.
+  const two = !!(srt[1] && srt[1].size >= srt[0].size * 0.75);
+  ci.multiN = two ? (ci.multiN || 0) + 1 : 0;
+  const multi = ci.multiN >= 2;
+  const ids = two ? srt.map((x) => x.id).join(', ') : '';
+  if (multi !== ci.multi || (multi && ids !== ci.multiIds)) { ci.multi = multi; ci.multiIds = ids; if (ci.state === 'scan') ciRender(); }
+  if (two) { ci.streak = { id: 0, n: 0 }; return; }
   if (ci.ign) {
     if (found.some((x) => x.id === ci.ign.id)) { ci.ign.last = t; if (f && f.id === ci.ign.id) f = null; }
     else if (t - ci.ign.last > 1.5) ci.ign = null;
@@ -932,10 +949,12 @@ function ciOpen() {
   if (!running) { toast('Start kameraet først'); return; }
   if (!worker) { toast('Skilte kan ikke læses i denne browser'); return; }
   ciData();
-  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = ''; ci.multi = false;
+  ci.open = true; ci.state = 'scan'; ci.streak = { id: 0, n: 0 }; ci.ign = null; ci.sure = false; ci.note = ''; ci.multi = false; ci.multiN = 0; ci.multiIds = ''; ci.camReady = false; ci.lastRead = now();
   active = null; motAbove = 0;
+  // et spring, der stadig læser nummer, afgøres nu, så det ikke optager læsningerne under indtjekningen
+  springs.filter((x) => x.state === 'reading').forEach(finishSpring);
   $('ci').hidden = false; ciRender(); ciDraw();
-  ciCamOp(ciToFront);
+  ciCamOp(ciToFront).then(() => { ci.camReady = true; });
 }
 function ciClose() {
   ci.open = false; clearTimeout(ci.timer); cancelAnimationFrame(ci.raf);
@@ -979,6 +998,8 @@ async function ciToBack() {
 function ciDraw() {
   if (!ci.open) return;
   ci.raf = requestAnimationFrame(ciDraw);
+  // står læsningerne stille (fx lige efter kameraskiftet), må en gammel "flere skilte"-besked ikke blive hængende
+  if (ci.multi && now() - (ci.lastRead || 0) > 1) { ci.multi = false; ci.multiN = 0; if (ci.state === 'scan') ciRender(); }
   const c = $('ciCam');
   if (cam.readyState < 2 || !cam.videoWidth) return;
   const w = 480, h = Math.round((w * cam.videoHeight) / cam.videoWidth);
@@ -1004,7 +1025,7 @@ function ciRender() {
   names.innerHTML = ''; pin.hidden = ci.state !== 'pin'; $('ciCam').hidden = ci.state === 'pin';
   if (ci.state !== 'pin') pin.innerHTML = '';
   if (ci.state === 'scan') {
-    msg.innerHTML = locked ? 'Indtjekningen er låst<small>Tryk "Lås op" og skriv trænerkoden for at ændre</small>' : (ci.multi ? 'Hold kun ét skilt op<small>Der er flere skilte i billedet. Hold ét skilt tæt på kameraet</small>' : 'Hold dit skilt op foran kameraet<small>Hold ét skilt tæt på kameraet og stille</small>');
+    msg.innerHTML = locked ? 'Indtjekningen er låst<small>Tryk "Lås op" og skriv trænerkoden for at ændre</small>' : (ci.multi ? `Hold kun ét skilt op<small>Der er flere skilte i billedet (skilt ${esc(ci.multiIds)}). Hold ét skilt tæt på kameraet</small>` : 'Hold dit skilt op foran kameraet<small>Hold ét skilt tæt på kameraet og stille</small>');
   } else if (ci.state === 'pick') {
     msg.innerHTML = `Skilt ${ci.tag} – hvem er du?`;
     const named = S.roster.filter((g) => g.name), list = named.length ? named : S.roster, m = d.map;
@@ -1019,6 +1040,7 @@ function ciRender() {
     msg.innerHTML = '';
   }
   if (ci.note && ci.state === 'scan') msg.innerHTML += `<small>${esc(ci.note)}</small>`;
+  if (ci.state === 'scan' && ci.dim) msg.innerHTML += `<small class="ciDim">${esc(ci.dim)}</small>`;
   msg.className = 'ciMsg' + (ci.state === 'done' ? ' ok' : ci.state === 'locked' ? ' bad' : '');
   names.querySelectorAll('[data-cig]').forEach((b) => (b.onclick = () => ciPick(+b.dataset.cig)));
   if ($('ciCancel')) $('ciCancel').onclick = () => { ci.state = 'scan'; ciRender(); };
@@ -2101,7 +2123,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261126000732';
+const APP_VERSION = '20261126130607';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
