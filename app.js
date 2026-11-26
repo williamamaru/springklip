@@ -1,5 +1,5 @@
 // Springklip: forsinket live-billede, automatisk springgenkendelse, nummerskilte og klip pr. gymnast.
-// Alt gemmes lokalt på enheden (localStorage til opsætning, IndexedDB til klip).
+// Opsætning gemmes i localStorage og klip i IndexedDB. Er en træner logget ind, sendes klippene også til skyen (Supabase).
 {
 'use strict';
 const $ = (id) => document.getElementById(id);
@@ -282,7 +282,7 @@ function label(x, y, text, sub, dpr, on) {
   sx.save();
   sx.font = `800 ${22 * dpr}px -apple-system,Arial,sans-serif`;
   const w1 = sx.measureText(text).width;
-  sx.font = `500 ${13 * dpr}px -apple-system,Arial,sans-serif`;
+  sx.font = `500 ${15 * dpr}px -apple-system,Arial,sans-serif`;
   const w2 = sub ? sx.measureText(sub).width + 8 * dpr : 0;
   sx.fillStyle = on ? '#f29a1f' : '#000c';
   const bw = w1 + w2 + 20 * dpr, bh = 36 * dpr;
@@ -290,7 +290,7 @@ function label(x, y, text, sub, dpr, on) {
   sx.fillStyle = on ? '#1d1203' : '#fff';
   sx.textBaseline = 'middle';
   sx.font = `800 ${22 * dpr}px -apple-system,Arial,sans-serif`; sx.fillText(text, x + 10 * dpr, y + bh / 2);
-  if (sub) { sx.font = `500 ${13 * dpr}px -apple-system,Arial,sans-serif`; sx.fillStyle = on ? '#1d1203' : '#9aa7b4'; sx.fillText(sub, x + 18 * dpr + w1, y + bh / 2 + 1); }
+  if (sub) { sx.font = `500 ${15 * dpr}px -apple-system,Arial,sans-serif`; sx.fillStyle = on ? '#1d1203' : '#9aa7b4'; sx.fillText(sub, x + 18 * dpr + w1, y + bh / 2 + 1); }
   sx.restore();
 }
 function drawLoop() {
@@ -327,7 +327,7 @@ function drawLoop() {
     if (filling && cam.readyState >= 2) drawImg(cam, R);
     else if (vb) drawImg(vb, R);
     else { sx.fillStyle = '#9aa7b4'; sx.font = `${16 * dpr}px Arial`; sx.textAlign = 'center'; sx.fillText('Venter på kameraet …', p.x + p.w / 2, p.y + p.h / 2); sx.textAlign = 'start'; }
-    const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `${Math.round(behind)} s`);
+    const txt = (P.length > 1 ? LET[i] + '  ' : '') + (filling ? 'Live' : behind < 0.5 ? 'Live' : `Forsinket ${Math.round(behind)} s`);
     const sub = paused ? 'pause' : filling ? `forsinkelse om ${Math.max(1, Math.ceil(behind - have))} s` : (Math.abs(lags[i] - S.delays[i]) > 0.5 ? 'spolet' : '');
     label(R.x + 10 * dpr, R.y + 10 * dpr, txt, S.clipOn === false && i === 0 && !paused ? (sub ? sub + ' · klip fra' : 'klip fra') : sub, dpr, P.length > 1 && i === sel);
     if (P.length > 1 && i === sel) { sx.strokeStyle = '#f29a1f'; sx.lineWidth = 3 * dpr; sx.strokeRect(R.x + 1.5 * dpr, R.y + 1.5 * dpr, R.w - 3 * dpr, R.h - 3 * dpr); }
@@ -348,7 +348,7 @@ requestAnimationFrame(drawLoop);
 
 function syncDelayUI() {
   $('delayIn').value = S.delays[sel];
-  $('delayLbl').textContent = S.views > 1 ? `Forsinkelse ${LET[sel]}` : 'Forsinkelse';
+  $('delayLbl').innerHTML = (S.views > 1 ? `Forsinkelse ${LET[sel]}` : 'Forsinkelse') + '<small>sek. efter springet</small>';
   for (const b of $('layoutSeg').children) b.classList.toggle('on', +b.dataset.n === S.views);
 }
 function setDelay(v) {
@@ -367,17 +367,21 @@ $('layoutSeg').onclick = (e) => {
 };
 syncDelayUI();
 const oldest = () => (ring.length ? ring[0].t : now());
+const needCam = () => { if (running) return false; toast('Start kameraet først'); return true; };
 $('back5').onclick = () => {
+  if (needCam()) return;
   for (let i = 0; i < 4; i++) { if (paused) pausedAt[i] = Math.max(oldest(), pausedAt[i] - 5); else lags[i] = Math.min(now() - oldest(), lags[i] + 5); }
 };
 $('fwd5').onclick = () => {
+  if (needCam()) return;
   for (let i = 0; i < 4; i++) { if (paused) pausedAt[i] = Math.min(now(), pausedAt[i] + 5); else lags[i] = Math.max(0, lags[i] - 5); }
 };
 $('pause').onclick = () => {
+  if (needCam()) return;
   if (paused) { for (let i = 0; i < 4; i++) lags[i] = Math.max(0, now() - pausedAt[i]); paused = false; $('pause').textContent = 'Pause'; }
   else { for (let i = 0; i < 4; i++) pausedAt[i] = viewT(i); paused = true; $('pause').textContent = 'Afspil'; }
 };
-$('toDelay').onclick = () => resetLags();
+$('toDelay').onclick = () => { if (!needCam()) resetLags(); };
 $('flipBtn').onclick = () => { S.flip = !S.flip; save(); $('flipBtn').classList.toggle('on', S.flip); };
 $('flipBtn').classList.toggle('on', S.flip);
 const camGet = (facing, exact) => navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: exact ? { exact: facing } : facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } });
@@ -458,14 +462,19 @@ setInterval(() => {
   const lo = oldest(), hi = now(), t = viewT(sel);
   if (!scrubbing && document.activeElement !== scrub) scrub.value = Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000);
   const behind = Math.max(0, hi - t);
-  $('scrubTxt').textContent = (S.views > 1 ? LET[sel] + ' ' : '') + (behind < 0.5 ? 'Live' : `−${Math.round(behind)} s`);
+  $('scrubTxt').textContent = (S.views > 1 ? LET[sel] + ' ' : '') + (behind < 0.5 ? 'Live' : `Forsinket ${Math.round(behind)} s`);
 }, 200);
 $('moreBtn').onclick = () => { const o = $('bar').classList.toggle('open'); $('moreBtn').setAttribute('aria-expanded', o); };
 let calmT = null;
 function wake() {
   document.body.classList.remove('calm');
   clearTimeout(calmT);
-  calmT = setTimeout(() => { if (running && view === 'live' && !zoneMode && $('player').hidden) document.body.classList.add('calm'); }, 8000);
+  calmT = setTimeout(() => {
+    // skjul aldrig under pause, eller mens en dialog/et panel er åbent
+    const open = !$('player').hidden || !$('cmp').hidden || !$('ci').hidden || !$('gate').hidden || $('bar').classList.contains('open') || document.activeElement?.matches?.('input,select');
+    if (running && view === 'live' && !zoneMode && !paused && !open) document.body.classList.add('calm');
+    else if (running && view === 'live') wake();
+  }, 8000);
 }
 document.addEventListener('pointerdown', wake, true);
 wake();
@@ -541,7 +550,7 @@ $('detBtn').onclick = () => { S.showDet = !S.showDet; save(); syncDetUI(); };
 syncDetUI();
 function syncPresetUI() {
   const sel = $('presetSel');
-  sel.innerHTML = S.presets.map((p, i) => `<option value="${i}"${i === S.pi ? ' selected' : ''}>${esc(p.name)}${p.zones.length ? '' : ' (intet felt)'}</option>`).join('') + '<option value="new">＋ Ny opstilling</option>';
+  sel.innerHTML = S.presets.map((p, i) => `<option value="${i}"${i === S.pi ? ' selected' : ''}>Opstilling: ${esc(p.name)}${p.zones.length ? '' : ' (intet felt)'}</option>`).join('') + '<option value="new">＋ Ny opstilling</option>';
 }
 function openZoneEdit() {
   if (!running) { toast('Start kameraet først'); syncPresetUI(); return; }
@@ -568,14 +577,15 @@ function syncClipUI() {
   b.setAttribute('aria-pressed', on);
   setRec();
 }
-$('clipBtn').onclick = () => { S.clipOn = S.clipOn === false; save(); syncClipUI(); toast(S.clipOn ? 'Klip slået til: spring gemmes' : 'Klip slået fra: intet bliver gemt'); };
-$('zoneBtn').onclick = openZoneEdit;
+function clipToggle() { S.clipOn = S.clipOn === false; save(); syncClipUI(); toast(S.clipOn ? 'Klip slået til: spring gemmes' : 'Klip slået fra: intet bliver gemt'); }
+$('clipBtn').onclick = () => (S.clipOn === false ? clipToggle() : trainerGate(clipToggle)); // at slå klip fra kræver trænerkoden
+$('zoneBtn').onclick = () => (running ? trainerGate(openZoneEdit) : openZoneEdit());
 $('zoneClear').onclick = () => { zoneEdit = []; lanePts = []; };
 // To slags felter: luftfelt (bevægelse i luften = spring) og bane (bevægelse der flytter sig hurtigt langs banen = spring).
 let zoneKind = 'air', lanePts = [];
 const ZONE_TXT = {
-  air: 'Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.',
-  lane: 'Tryk på banens to hjørner, hvor gymnasterne starter, og derefter de to hjørner i den ende, hvor de lander. Tag gerne lidt luft over banen med. Op til 4 felter.',
+  air: 'Luftfelt: bevægelse i feltet tæller som et spring. Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.',
+  lane: 'Bane: hurtigt løb hen ad banen tæller som et spring. Tryk på banens to hjørner, hvor gymnasterne starter, og derefter de to hjørner i den ende, hvor de lander. Tag gerne lidt luft over banen med. Op til 4 felter.',
 };
 function setZoneKind(k) {
   zoneKind = k; lanePts = [];
@@ -585,12 +595,13 @@ function setZoneKind(k) {
   const h = $('zoneHelp'); h.style.top = k === 'lane' ? '12px' : ''; h.style.bottom = k === 'lane' ? 'auto' : '';
 }
 $('zoneKind').onclick = (e) => { const b = e.target.closest('button'); if (b) setZoneKind(b.dataset.k); };
-$('zoneDel').onclick = (e) => {
+$('zoneDel').onclick = (e) => trainerGate(() => zoneDelTap(e));
+function zoneDelTap(e) {
   if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tryk igen for at slette'; return; }
   delete e.target.dataset.sure; e.target.textContent = 'Slet opstilling';
   S.presets.splice(S.pi, 1); S.pi = 0; save();
   zoneMode = false; zoneEdit = null; $('zoneHelp').hidden = true; syncPresetUI();
-};
+}
 $('zoneDone').onclick = () => {
   zoneMode = false; $('zoneHelp').hidden = true;
   const p = preset();
@@ -1558,7 +1569,8 @@ async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.m
 function holdUI() {
   const b = $('holdBtn');
   const sec = Math.floor((Date.now() - hold.t0) / 1000);
-  b.textContent = hold.on ? `■ Stop holdomgang ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : 'Holdomgang';
+  if (hold.on) b.textContent = `■ Stop holdomgang ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  else b.innerHTML = 'Holdomgang<small>hele holdet i ét klip</small>';
   b.classList.toggle('rec', hold.on);
   b.setAttribute('aria-pressed', hold.on);
 }
@@ -1648,6 +1660,7 @@ $('tabs').onclick = (e) => { const b = e.target.closest('button'); if (b) show(b
 function show(v) {
   if (document.body.classList.contains('gymnast')) v = 'mine';
   view = v;
+  if (v !== 'clips' && v !== 'setup' && trainerOk) lockTrainer(); // forlader trænerpanelet: lås det
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.v === v);
   for (const id of ['live', 'clips', 'mine', 'setup']) $(id).hidden = id !== v;
   if (v === 'clips') renderClips();
@@ -1666,46 +1679,131 @@ function refreshLists() {
 }
 
 // Trænerkode
-function pinScreen(wrap, title, onOk) {
-  const first = !S.trainerHash;
+// Kodeskærmen kan stå flere steder (Klip, Opsætning, indtjekningen, over Live). Dens elementer findes derfor
+// altid via dens egen beholder (wrap) og har ingen id'er, så to kodeskærme aldrig forveksles.
+const TRAINER_GRACE = 5 * 60 * 1000; // låst op inden for 5 min: knapperne på Live kræver ikke koden igen
+let trainerT = 0; // sidste tryk i Klip/Opsætning eller seneste rigtige kode
+const PIN_RE = /^\d{6}$/;
+const pinNewErr = (a, b) => (!PIN_RE.test(a) ? 'Koden skal være 6 cifre.' : a !== b ? 'De to koder er ikke ens. Skriv dem igen.' : '');
+const pinLockMsg = () => `For mange forkerte forsøg. Vent ${Math.ceil(((S.pinLock || 0) - Date.now()) / 60000)} min.`;
+function pinFail() { // forkert kode: efter 5 forsøg låses kodeskærmen i 5-60 min
+  S.pinFails = (S.pinFails || 0) + 1;
+  if (S.pinFails >= 5) S.pinLock = Date.now() + Math.min(60, 5 * 2 ** (S.pinFails - 5)) * 60000;
+  save();
+  return S.pinFails >= 5 ? 'Forkert kode. Koden er låst i et stykke tid.' : 'Forkert kode.';
+}
+const pinInput = (cls, label, isNew) => `<input class="${cls}" type="password" inputmode="numeric" pattern="[0-9]*"${isNew ? ' maxlength="6"' : ''} autocomplete="off" aria-label="${label}">`;
+function pinEye(root) { // "Vis" viser/skjuler alle kodefelterne i formularen
+  const b = root.querySelector('.pinEye'); if (!b) return;
+  b.onclick = () => {
+    const on = b.getAttribute('aria-pressed') !== 'true';
+    b.setAttribute('aria-pressed', on); b.textContent = on ? 'Skjul' : 'Vis';
+    root.querySelectorAll('input[inputmode=numeric]').forEach((i) => (i.type = on ? 'text' : 'password'));
+  };
+}
+function pinScreen(wrap, title, onOk, opt = {}) {
+  const first = !S.trainerHash || opt.reset;
+  const q = (sel) => wrap.querySelector(sel);
   // første gang på en enhed: kun en godkendt træner (logget ind i skyen) kan oprette trænerpanelet
-  if (first && sb && !cloudTrainer) {
+  if (first && !opt.reset && sb && !cloudTrainer) {
     wrap.innerHTML = `<div class="pin" style="max-width:560px"><h2>${esc(title)}</h2>
       <p class="muted">Kun for trænere. Log ind med trænerlogin for at sætte denne enhed op.</p>
-      <div class="sec" id="cloudSec" style="text-align:left"></div></div>`;
-    renderCloud();
+      <div class="sec cloudSec" style="text-align:left"></div></div>`;
+    renderCloud(q('.cloudSec'));
     return;
   }
-  const lockLeft = Math.ceil(((S.pinLock || 0) - Date.now()) / 1000);
-  wrap.innerHTML = `<form class="pin" id="pinF">
+  const locked = !first && (S.pinLock || 0) > Date.now();
+  // låst efter for mange forsøg (måske en spøg): en træner kan i stedet logge ind med sit trænerlogin
+  const viaLogin = locked && cloudUser;
+  const alt = !first && sb ? (viaLogin
+    ? '<button type="button" class="pinAlt">Log ind med trænerlogin i stedet</button>'
+    : '<button type="button" class="ghost pinAlt">Glemt koden? Log ind med trænerlogin</button>') : '';
+  wrap.innerHTML = `<form class="pin" novalidate${opt.reset ? ' data-keep' : ''}>
     <h2>${esc(title)}</h2>
-    <p class="muted">${first ? 'Vælg en trænerkode på mindst 6 cifre. Den beskytter klip, opsætning og pigernes koder på denne enhed.' : 'Skriv trænerkoden.'}</p>
-    <input id="pinIn" type="password" inputmode="numeric" autocomplete="off" aria-label="Trænerkode">
+    <p class="muted">${opt.reset ? 'Vælg en ny trænerkode på 6 cifre.' : first ? 'Vælg en trænerkode på 6 cifre. Den beskytter klip, opsætning og pigernes koder på denne enhed.' : 'Skriv trænerkoden (6 cifre).'}</p>
+    <div class="pinRow">${pinInput('pinIn', first ? 'Ny trænerkode' : 'Trænerkode', first)}<button type="button" class="ghost pinEye" aria-pressed="false">Vis</button></div>
+    ${first ? `<label>Skriv den samme kode igen</label>${pinInput('pinRep', 'Gentag trænerkoden', true)}` : ''}
     <button class="acc">${first ? 'Gem kode' : 'Åbn'}</button>
-    <p class="err" id="pinErr">${lockLeft > 0 ? `For mange forkerte forsøg. Vent ${Math.ceil(lockLeft / 60)} min.` : ''}</p></form>`;
-  $('pinF').onsubmit = async (e) => {
+    <p class="err pinErr">${locked ? pinLockMsg() : ''}</p>
+    ${alt}</form>`;
+  const err = q('.pinErr');
+  pinEye(wrap);
+  if (q('.pinAlt')) q('.pinAlt').onclick = () => pinCloud(wrap, title, onOk, viaLogin ? 'unlock' : 'forgot');
+  q('form').onsubmit = async (e) => {
     e.preventDefault();
-    if ((S.pinLock || 0) > Date.now()) { $('pinErr').textContent = `For mange forkerte forsøg. Vent ${Math.ceil((S.pinLock - Date.now()) / 60000)} min.`; return; }
-    const v = $('pinIn').value.trim();
-    if (first && v.length < 6) { $('pinErr').textContent = 'Koden skal have mindst 6 tegn.'; return; }
-    const h = await sha(v);
-    if (first) { S.trainerHash = h; save(); }
-    codeLock = false;
-    if (h !== S.trainerHash) {
-      S.pinFails = (S.pinFails || 0) + 1;
-      if (S.pinFails >= 5) { S.pinLock = Date.now() + Math.min(60, 5 * 2 ** (S.pinFails - 5)) * 60000; }
-      save();
-      $('pinErr').textContent = S.pinFails >= 5 ? 'Forkert kode. Panelet er låst i et stykke tid.' : 'Forkert kode.';
-      $('pinIn').value = '';
+    if (!first && (S.pinLock || 0) > Date.now()) { pinScreen(wrap, title, onOk); return; } // viser låsen og trænerlogin
+    const v = q('.pinIn').value.trim();
+    if (first) {
+      const m = pinNewErr(v, q('.pinRep').value.trim());
+      if (m) { err.textContent = m; return; }
+      S.trainerHash = await sha(v); save();
+    } else if ((await sha(v)) !== S.trainerHash) {
+      err.textContent = pinFail();
+      q('.pinIn').value = '';
+      if (S.pinFails >= 5) pinScreen(wrap, title, onOk);
       return;
     }
-    S.pinFails = 0; S.pinLock = 0; save();
-    trainerOk = true; trainerPin = v;
-    await rosterPull();
-    onOk();
+    codeLock = false;
+    pinOk(v, onOk);
   };
-  $('pinIn').focus();
+  q('.pinIn').focus();
 }
+async function pinOk(v, onOk) {
+  S.pinFails = 0; S.pinLock = 0; save();
+  trainerOk = true; trainerPin = v; trainerT = Date.now();
+  await rosterPull();
+  onOk();
+}
+// Trænerlogin (skyen) i stedet for koden: når koden er glemt, eller når den er låst efter for mange forsøg
+function pinCloud(wrap, title, onOk, mode) {
+  const q = (sel) => wrap.querySelector(sel);
+  wrap.innerHTML = `<form class="pin" novalidate data-keep><h2>${esc(title)}</h2>
+    <p class="muted">${mode === 'forgot' ? 'Log ind med dit trænerlogin. Bagefter vælger du en ny trænerkode.' : 'Log ind med dit trænerlogin for at låse op.'}</p>
+    <div class="alt">
+      <input class="cEm" type="text" inputmode="email" autocomplete="username" placeholder="E-mail" aria-label="E-mail" value="${esc(cloudUser?.email || '')}">
+      <input class="cPw" type="password" autocomplete="current-password" placeholder="Adgangskode" aria-label="Adgangskode">
+    </div>
+    <button class="acc">Log ind</button>
+    <button type="button" class="ghost cBack">Tilbage til trænerkoden</button>
+    <p class="err cErr"></p></form>`;
+  const err = q('.cErr');
+  q('.cBack').onclick = () => pinScreen(wrap, title, onOk);
+  q('form').onsubmit = async (e) => {
+    e.preventDefault();
+    const email = q('.cEm').value.trim(), password = q('.cPw').value;
+    if (!email || !password) { err.textContent = 'Skriv e-mail og adgangskode.'; return; }
+    err.textContent = 'Et øjeblik …';
+    let ok = false;
+    try {
+      const r = await sb.auth.signInWithPassword({ email, password });
+      if (r.error) { err.textContent = 'Forkert e-mail eller adgangskode.'; return; }
+      const { data: t } = await sb.from('trainers').select('user_id').eq('user_id', r.data.user.id).maybeSingle();
+      ok = !!t;
+      if (ok) { cloudUser = r.data.user; cloudTrainer = true; }
+    } catch { err.textContent = 'Ingen forbindelse til skyen. Tjek internettet, og prøv igen.'; return; }
+    if (!ok) { err.textContent = 'Kontoen er ikke godkendt som træner.'; return; }
+    S.pinFails = 0; S.pinLock = 0; save();
+    if (mode === 'forgot') pinScreen(wrap, title, onOk, { reset: true }); // den gamle kode virker, indtil den nye er gemt
+    else pinOk(null, onOk);
+  };
+  q('.cEm').value ? q('.cPw').focus() : q('.cEm').focus();
+}
+// Lås trænerpanelet. hard (knappen "Lås"): også knapperne på Live kræver koden igen med det samme.
+function lockTrainer(hard) {
+  const was = trainerOk;
+  trainerOk = false; trainerPin = null;
+  if (hard) trainerT = 0;
+  $('clipsWrap').innerHTML = ''; $('setupWrap').innerHTML = ''; // intet fra panelet ligger tilbage i siden
+  if (was && (view === 'clips' || view === 'setup')) show(view);
+}
+// Klip fra, Indstil felter og Slet opstilling på Live kræver trænerkoden (hvis der er sat en).
+function trainerGate(fn) {
+  if (!S.trainerHash || trainerOk || Date.now() - trainerT < TRAINER_GRACE) { fn(); return; }
+  $('gate').hidden = false; document.body.classList.remove('calm');
+  pinScreen($('gateWrap'), 'Kun for trænere', () => { gateClose(); fn(); });
+}
+function gateClose() { $('gate').hidden = true; $('gateWrap').innerHTML = ''; wake(); }
+$('gateNo').onclick = gateClose;
 
 // Trænerens liste: klip på denne enhed + klip i skyen (fx optaget på en anden enhed).
 let remoteCache = new Map();
@@ -1770,7 +1868,7 @@ async function renderClips() {
       : `<div class="empty">${onlyUnk ? 'Ingen ukendte klip.' : 'Ingen klip endnu. Start kameraet under Live, så kommer springene her af sig selv.'}</div>`}`;
   $('unkBtn').onclick = () => { w.dataset.unk = onlyUnk ? '0' : '1'; renderClips(); };
   if ($('assignBtn')) $('assignBtn').onclick = () => renderAssign(0);
-  $('lockBtn').onclick = () => { trainerOk = false; renderClips(); };
+  $('lockBtn').onclick = () => lockTrainer(true);
   $('cmpBtn').onclick = () => { cmpPick = cmpPick ? null : []; renderClips(); };
   w.querySelectorAll('[data-play]').forEach((b) => {
     if (cmpPick && cmpPick.some((x) => x.id === b.dataset.play)) b.closest('.clip').classList.add('sel');
@@ -1892,31 +1990,29 @@ async function renderMine() {
 }
 document.addEventListener('pointerdown', () => { if (mineG && view === 'mine') { clearTimeout(idleT); idleT = setTimeout(() => { mineG = null; renderMine(); }, 3 * 60 * 1000); } });
 
+let advOpen = false;
+const dk1 = (x) => (+x).toLocaleString('da-DK', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 function renderSetup() {
   const w = $('setupWrap');
   if (!trainerOk) return pinScreen(w, 'Opsætning', renderSetup);
-  w.innerHTML = `<h2>Opsætning</h2>
-    <div class="sec" id="cloudSec"></div>
+  w.innerHTML = `<div class="row"><h2 style="flex:1">Opsætning</h2>
+      <button id="setLock"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Lås</button></div>
+    <p class="muted">Opsætningen låser sig selv, når du går tilbage til Live, og efter 5 minutter uden tryk.</p>
+    <div class="sec cloudSec"></div>
     <div class="sec"><h3>Gymnaster</h3>
-      <p class="muted">Nummeret passer til skiltet. Tryk på prikkerne for at se en gymnasts kode, og giv hende den personligt. Med koden kan hun se sine egne spring på williamamaru.github.io/springklip/#mine.</p>
+      <p class="muted">Nummeret passer til skiltet. Tryk på "Vis" for at se en gymnasts kode, og giv hende den personligt. Koden skjules igen efter 15 sekunder. Med koden kan hun se sine egne spring på williamamaru.github.io/springklip/#mine.</p>
       <table><thead><tr><th>Nr.</th><th>Navn</th><th>Kode</th><th></th></tr></thead><tbody>
       ${S.roster.map((g) => `<tr><td class="num">${g.n}</td><td><input type="text" data-name="${g.n}" value="${esc(g.name)}" placeholder="Navn" aria-label="Navn til nr. ${g.n}"></td>
-        <td class="code"><button class="ghost" data-show="${g.n}" aria-label="Vis kode for nr. ${g.n}">••••••</button></td><td><button class="ghost" data-new="${g.n}">Ny kode</button></td></tr>`).join('')}
+        <td class="code"><span class="cv" data-cv="${g.n}">••••••</span><button class="ghost" data-show="${g.n}" aria-pressed="false" aria-label="Vis kode for nr. ${g.n}">Vis</button></td><td><button class="ghost" data-new="${g.n}">Ny kode</button></td></tr>`).join('')}
       </tbody></table>
       <div class="row"><button id="addG">Tilføj nummer</button>
       <a href="skilte/Nummerskilte_1-30.pdf" target="_blank" rel="noopener"><button>Nummerskilte 1–30 (PDF)</button></a></div>
     </div>
-    <div class="sec"><h3>Ydelse på denne enhed</h3>
-      <p class="muted" id="perfTxt">${running ? perfText() : 'Start kameraet under Live for at se tallene.'}</p>
-      <p class="muted" style="font-size:13px">Ved 30 billeder/sek. kører det helt glat. Står der "på hovedtråden", mangler browseren en funktion, og det kan hakke mere.</p>
-      <label>Motor</label>
-      <div class="grp seg" id="engSeg" role="group" aria-label="Motor"><button data-e="jpeg">Standard</button><button data-e="h264">Ny (H.264, prøve)</button></div>
-      <p class="muted" style="font-size:13px">Den nye motor lader iPad'ens videochip komprimere og afspille billederne. Det burde hakke mindre og bruge mindre hukommelse. Siden genindlæses, når du skifter, og kameraet skal startes igen.</p>
-    </div>
     <div class="sec"><h3>Springgenkendelse</h3>
-      <label>Følsomhed: kræver at <b id="sensV">${S.sens}</b> % af luftfeltet bevæger sig
-        <input id="sens" type="range" min="0.3" max="6" step="0.1" value="${S.sens}" style="width:100%"></label>
-      <p class="muted">Kommer der spring med, som ikke er spring: hæv tallet. Bliver rigtige spring overset: sænk det. Luftfeltet indstilles under Live.</p>
+      <label>Følsomhed: kræver at <b id="sensV">${dk1(S.sens)}</b> % af luftfeltet bevæger sig
+        <input id="sens" type="range" min="0.3" max="6" step="0.1" value="${S.sens}" style="width:100%" aria-valuetext="${dk1(S.sens)} procent"></label>
+      <div class="ends" aria-hidden="true"><span>Mere følsom</span><span>Mindre følsom</span></div>
+      <p class="muted">Kommer der spring med, som ikke er spring: træk mod "Mindre følsom". Bliver rigtige spring overset: træk mod "Mere følsom". Luftfeltet (området i luften over redskabet, hvor et spring tælles) indstilles under Live med "Indstil felter".</p>
     </div>
     <div class="sec"><h3>Opbevaring</h3>
       <label>Slet klip automatisk efter <input id="keep" type="number" min="1" max="365" value="${S.keepDays}" style="width:90px;display:inline-block"> dage</label>
@@ -1926,7 +2022,19 @@ function renderSetup() {
       <p class="muted">Afspil en optaget video i stedet for kameraet. Den bliver behandlet som live-billede, så du kan prøve springgenkendelse og klip.</p>
       <input id="testFile" type="file" accept="video/*">
     </div>
-    <div class="sec"><h3>Trænerkode</h3><button id="newPin">Skift trænerkode</button></div>`;
+    <div class="sec"><h3>Trænerkode</h3>
+      <p class="muted">Koden beskytter Klip, Opsætning og knapperne Klip fra, Indstil felter og Slet opstilling på Live.</p>
+      <div id="pinChg"><button id="newPin">Skift trænerkode</button></div></div>
+    <div class="sec"><details id="adv"${advOpen ? ' open' : ''}><summary>Avanceret: ydelse og motor</summary>
+      <p class="muted" id="perfTxt">${running ? perfText() : 'Start kameraet under Live for at se tallene.'}</p>
+      <p class="muted help">Ved 30 billeder/sek. kører det helt glat. Står der "på hovedtråden", mangler browseren en funktion, og det kan hakke mere.</p>
+      <label>Motor</label>
+      <div class="seg" id="engSeg" role="group" aria-label="Motor"><button data-e="jpeg">Standard</button><button data-e="h264">Ny (H.264, prøve)</button></div>
+      <p class="muted help">Den nye motor lader iPad'ens videochip komprimere og afspille billederne. Det burde hakke mindre og bruge mindre hukommelse. Siden genindlæses, når du skifter, og kameraet skal startes igen.</p>
+      <div class="row" id="engAsk" hidden><span id="engAskTxt"></span><button class="acc" id="engYes">Skift og genindlæs</button><button id="engNo">Annullér</button></div>
+    </details></div>`;
+  $('setLock').onclick = () => lockTrainer(true);
+  $('adv').ontoggle = () => { advOpen = $('adv').open; };
   w.querySelectorAll('[data-name]').forEach((i) => (i.onchange = () => { const g = S.roster.find((x) => x.n === +i.dataset.name); g.name = i.value.trim(); save(); cloudName(g); }));
   // Ny kode kræver to tryk, fordi den gamle kode holder op med at virke
   w.querySelectorAll('[data-new]').forEach((b) => (b.onclick = async () => {
@@ -1941,20 +2049,32 @@ function renderSetup() {
     if (cloudTrainer) { const c = await cloudNewCode(n); if (!c) return; code = c; }
     S.roster.push({ n, name: '', code }); save(); renderSetup();
   };
-  renderCloud();
+  renderCloud(w.querySelector('.cloudSec'));
   if (cloudTrainer && !setupPulled) { setupPulled = true; rosterPull(); }
   w.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => {
-    const g = S.roster.find((x) => x.n === +b.dataset.show);
-    b.textContent = b.textContent.startsWith('•') ? g.code : '••••••';
+    const g = S.roster.find((x) => x.n === +b.dataset.show), cv = w.querySelector(`[data-cv="${b.dataset.show}"]`);
+    const on = b.getAttribute('aria-pressed') !== 'true';
+    cv.textContent = on ? g.code : '••••••'; b.textContent = on ? 'Skjul' : 'Vis'; b.setAttribute('aria-pressed', on);
+    clearTimeout(b._t);
+    if (on) b._t = setTimeout(() => { if (b.isConnected && b.getAttribute('aria-pressed') === 'true') b.click(); }, 15000);
   }));
   for (const b of $('engSeg').children) b.classList.toggle('on', b.dataset.e === (S.engine || 'jpeg'));
+  // motorskift genindlæser siden (og stopper kameraet): spørg først
+  let engWant = null;
   $('engSeg').onclick = (e) => {
     const b = e.target.closest('button'); if (!b || b.dataset.e === (S.engine || 'jpeg')) return;
-    S.engine = b.dataset.e; save();
+    engWant = b.dataset.e;
+    $('engAskTxt').textContent = `Skift til ${engWant === 'h264' ? 'den nye motor' : 'standardmotoren'}? Siden genindlæses${running ? ', og kameraet skal startes igen' : ''}.`;
+    $('engAsk').hidden = false;
+  };
+  $('engNo').onclick = () => { engWant = null; $('engAsk').hidden = true; };
+  $('engYes').onclick = () => {
+    if (!engWant) return;
+    S.engine = engWant; save();
     toast(S.engine === 'h264' ? 'Skifter til den nye motor …' : 'Skifter til standardmotoren …');
     setTimeout(() => location.reload(), 600);
   };
-  $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = S.sens; save(); };
+  $('sens').oninput = (e) => { S.sens = +e.target.value; $('sensV').textContent = dk1(S.sens); e.target.setAttribute('aria-valuetext', dk1(S.sens) + ' procent'); save(); };
   $('keep').onchange = (e) => { S.keepDays = Math.max(1, +e.target.value || 10); save(); };
   $('wipe').onclick = async (e) => {
     const b = e.target;
@@ -1963,7 +2083,31 @@ function renderSetup() {
     b.textContent = 'Alle klip er slettet'; delete b.dataset.sure;
   };
   $('testFile').onchange = (e) => { const f = e.target.files[0]; if (f) { show('live'); startCamera(f); } };
-  $('newPin').onclick = () => { S.trainerHash = ''; save(); trainerOk = false; trainerPin = null; renderSetup(); };
+  $('newPin').onclick = pinChange;
+}
+// Skift trænerkode: kræver den nuværende kode, og den nye gælder først, når der trykkes Gem.
+function pinChange() {
+  const box = $('pinChg'), q = (sel) => box.querySelector(sel);
+  box.innerHTML = `<form novalidate style="display:grid;gap:var(--s3);max-width:380px">
+    <label>Nuværende kode ${pinInput('pcOld', 'Nuværende trænerkode')}</label>
+    <label>Ny kode (6 cifre) ${pinInput('pcNew', 'Ny trænerkode', true)}</label>
+    <label>Skriv den nye kode igen ${pinInput('pcRep', 'Gentag ny trænerkode', true)}</label>
+    <div class="row"><button class="acc">Gem ny kode</button><button type="button" class="ghost pinEye" aria-pressed="false">Vis</button><button type="button" class="pcNo">Annullér</button></div>
+    <p class="err pcErr"></p></form>`;
+  pinEye(box);
+  const err = q('.pcErr');
+  q('.pcNo').onclick = () => renderSetup();
+  q('form').onsubmit = async (e) => {
+    e.preventDefault();
+    if ((S.pinLock || 0) > Date.now()) { err.textContent = pinLockMsg(); return; }
+    if ((await sha(q('.pcOld').value.trim())) !== S.trainerHash) { err.textContent = pinFail(); q('.pcOld').value = ''; return; }
+    S.pinFails = 0; S.pinLock = 0;
+    const v = q('.pcNew').value.trim(), m = pinNewErr(v, q('.pcRep').value.trim());
+    if (m) { save(); err.textContent = m; return; }
+    S.trainerHash = await sha(v); save();
+    renderSetup(); toast('Trænerkoden er skiftet');
+  };
+  q('.pcOld').focus();
 }
 
 // ---------- Skyen (Supabase) ----------
@@ -1984,7 +2128,7 @@ async function cloudCheck() {
     }
   } catch {}
   if (view === 'setup' && trainerOk) renderCloud();
-  if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer) show(view);
+  if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer && !$(view).querySelector('[data-keep]')) show(view); // ikke midt i trænerlogin/ny kode
   if (cloudTrainer) { cloudRetry(); cloudPrune(); rosterPull(); }
 }
 const codeHash = async (n, code) => {
@@ -2054,9 +2198,10 @@ async function cloudPrune() {
   await sb.storage.from('clips').remove(data.map((r) => r.path));
   await sb.from('clips').delete().in('id', data.map((r) => r.id));
 }
-function renderCloud() {
-  const el = $('cloudSec');
+function renderCloud(el) {
+  el = el || document.querySelector('.view:not([hidden]) .cloudSec');
   if (!el) return;
+  document.querySelectorAll('.cloudSec').forEach((o) => { if (o !== el) o.innerHTML = ''; }); // kun ét loginfelt i siden ad gangen
   if (!sb) { el.innerHTML = '<h3>Skyen</h3><p class="muted">Forbindelsen til skyen kunne ikke startes.</p>'; return; }
   if (!cloudUser) {
     el.innerHTML = `<h3>Skyen: så gymnasterne kan se deres spring hjemme</h3>
@@ -2091,8 +2236,11 @@ function renderCloud() {
 }
 if (sb) sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(cloudCheck, 0); });
 
-let lockT = null;
-document.addEventListener('pointerdown', () => { clearTimeout(lockT); lockT = setTimeout(() => { if (trainerOk) { trainerOk = false; trainerPin = null; if (view === 'clips' || view === 'setup') show(view); } }, 10 * 60 * 1000); }, true);
+// Trænerpanelet låses efter 5 min uden tryk i Klip/Opsætning. Tryk på Live (af alle, der går forbi) tæller ikke.
+const trainerTouch = () => { if (trainerOk && (view === 'clips' || view === 'setup')) trainerT = Date.now(); };
+document.addEventListener('pointerdown', trainerTouch, true);
+document.addEventListener('keydown', trainerTouch, true);
+setInterval(() => { if (trainerOk && Date.now() - trainerT > TRAINER_GRACE) lockTrainer(); }, 10_000);
 
 // ---------- Status ----------
 let toastT = null;
@@ -2112,6 +2260,7 @@ async function setRec() {
 setInterval(setRec, 5000);
 
 $('startCam').onclick = () => startCamera();
+$('keepNote').textContent = S.keepDays;
 if (!navigator.mediaDevices?.getUserMedia) $('camErr').textContent = 'Denne browser kan ikke bruge kameraet. Brug Safari på iPad eller Chrome.';
 pruneOld().catch(() => {});
 setRec();

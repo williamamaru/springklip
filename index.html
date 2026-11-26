@@ -15,13 +15,15 @@
 :root{
   /* neutral grafit */
   --bg:#14181c;--panel:#1b2026;--raise:#252b33;--raise-2:#2e353e;--line:#363e48;--line-2:#4a5360;
+  /* kant på felter: mindst 3:1 mod baggrunden */
+  --line-ctl:#6b7583;
   --ink:#f1f3f5;--ink-2:#c9d0d7;--muted:#9da8b4;--stage:#000;
   /* accent + signaler */
   --acc:#f29a1f;--acc-hi:#f7ad44;--acc-ink:#1d1203;
   --rec:#d63c2f;--rec-ink:#fff;--ok:#3fb47c;--bad:#ff7d70;
   /* typografi: systemfont, skala ca. 1,2 */
   --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  --fs-xs:13px;--fs-s:15px;--fs-m:17px;--fs-l:20px;--fs-xl:26px;--fs-xxl:32px;
+  --fs-xs:14px;--fs-s:15px;--fs-m:17px;--fs-l:20px;--fs-xl:26px;--fs-xxl:32px;
   /* afstande (4-trin) */
   --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
   /* former: små for betjening, større for flader */
@@ -51,7 +53,8 @@ button:active{transform:translateY(1px)}
 button.acc{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:700}
 @media (hover:hover){button.acc:hover{background:var(--acc-hi);border-color:var(--acc-hi)}
 button.ghost:hover{background:var(--raise);color:var(--ink)}}
-button.ghost{background:transparent;border-color:transparent;color:var(--ink-2)}
+/* sekundære knapper: gennemsigtige, men med synlig kant, så de ikke ligner tekst */
+button.ghost{background:transparent;border-color:var(--line-2);color:var(--ink)}
 button.bad{color:var(--bad)}
 button.bad:not(.ghost){border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
 button:disabled,button:disabled:hover{opacity:.42;cursor:not-allowed;transform:none;background:var(--raise);border-color:var(--line)}
@@ -62,6 +65,8 @@ button.acc:disabled,button.acc:disabled:hover{background:var(--raise);border-col
 button[aria-pressed=true],button.on{background:var(--ink);border-color:var(--ink);color:var(--bg)}
 button[aria-pressed=true]:hover,button.on:hover{background:#fff;border-color:#fff}
 /* Klip: til/fra viser tilstanden med en prik: grøn = spring gemmes */
+/* Vis/Skjul ved koder: teksten skifter, knappen skal ikke se "valgt" ud */
+td.code button[aria-pressed=true],td.code button[aria-pressed=true]:hover,button.pinEye[aria-pressed=true],button.pinEye[aria-pressed=true]:hover{background:transparent;border-color:var(--line-2);color:var(--ink)}
 #clipBtn::before{content:"";width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
 #clipBtn.on,#clipBtn.on:hover{background:var(--raise);border-color:color-mix(in srgb,var(--ok) 60%,var(--line));color:var(--ink)}
 #clipBtn.on::before{background:var(--ok)}
@@ -73,6 +78,7 @@ button[aria-pressed=true]:hover,button.on:hover{background:#fff;border-color:#ff
 input[type=text],input[type=number],input[type=password],select{
   min-height:var(--hit);width:100%;padding:0 var(--s3);border:1px solid var(--line);border-radius:var(--r-ctl);
   background:var(--panel);color:var(--ink);font-size:var(--fs-m)}
+input[type=text],input[type=number],input[type=password],select{border-color:var(--line-ctl)}
 select{padding-right:var(--s6);appearance:none;-webkit-appearance:none;font-weight:600;
   background:var(--raise) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239da8b4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 12px center}
 input::placeholder{color:var(--muted);opacity:.8}
@@ -134,6 +140,11 @@ main{min-height:0;overflow:hidden;position:relative}
 .bar .grp.more{gap:var(--s1)}
 .bar button.ghost{padding:0 var(--s3)}
 .bar label{font-size:var(--fs-xs);color:var(--muted);font-weight:600}
+/* korte forklaringer under fagord (Forsinkelse, Holdomgang, Vis genkendelse, Bevægelse) */
+.bar label small,.bar button small{display:block;font-size:var(--fs-xs);font-weight:500;color:var(--muted);line-height:1.15}
+.bar label small{font-weight:500}
+.bar button:has(small){flex-direction:column;gap:0;line-height:1.15}
+#delayLbl{line-height:1.2;text-align:right}
 .scrubg{flex:1 1 100%;gap:var(--s3)}
 #scrub{height:36px}
 #scrub{flex:1}
@@ -161,6 +172,10 @@ body.gymnast header{min-height:52px;padding-bottom:var(--s1)}
 #mineOut{background:var(--raise);border-color:var(--line);color:var(--ink)}
 body.calm{grid-template-rows:minmax(0,1fr)}
 body.calm header,body.calm .bar{display:none}
+/* når knapperne er skjult: lille pille nederst, så man ved at de kan hentes frem */
+.calmHint{display:none;position:absolute;left:50%;bottom:var(--s3);transform:translateX(-50%);z-index:2;padding:6px var(--s4);border-radius:999px;
+  background:rgb(0 0 0 / .6);border:1px solid var(--line-2);color:var(--ink-2);font-size:var(--fs-s);font-weight:600;pointer-events:none;white-space:nowrap}
+body.calm .calmHint{display:block}
 
 /* ---------- sider: Klip, Mine spring, Opsætning ---------- */
 .wrap{max-width:1100px;margin:0 auto;padding:var(--s5) var(--s5) var(--s6)}
@@ -193,13 +208,24 @@ h2{font-size:var(--fs-xl);margin:0 0 var(--s2)}
 .sec .row{margin-top:var(--s1)}
 .sec a{text-decoration:none}
 .sec>.seg{justify-self:start}
+.sec details summary{cursor:pointer;font-weight:700;font-size:var(--fs-l);min-height:var(--hit);display:flex;align-items:center;color:var(--ink)}
+.sec details summary{list-style:none;gap:var(--s3)}
+.sec details summary::-webkit-details-marker{display:none}
+.sec details summary::before{content:"";width:9px;height:9px;flex:none;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform var(--t)}
+.sec details[open] summary::before{transform:rotate(45deg)}
+.sec details[open] summary{margin-bottom:var(--s3)}
+.sec details>*+*{margin-top:var(--s3)}
+.sec details .seg{display:flex;width:max-content}
+.ends{display:flex;justify-content:space-between;font-size:var(--fs-s);color:var(--muted)}
+.help{font-size:var(--fs-s)}
+td.code .cv{display:inline-block;min-width:7.5em;font-size:var(--fs-m);font-weight:700;letter-spacing:.14em;font-variant-numeric:tabular-nums;vertical-align:middle}
 table{width:100%;border-collapse:collapse;font-size:var(--fs-s)}
 td,th{padding:var(--s1) var(--s2) var(--s1) 0;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
 th{padding-top:0;padding-bottom:var(--s2);font-size:var(--fs-xs);color:var(--muted);font-weight:600}
 tbody tr:last-child td{border-bottom:0}
 td.num{width:52px;font-weight:800;font-size:var(--fs-l);font-variant-numeric:tabular-nums}
 td.code{white-space:nowrap}
-td.code button{font-size:var(--fs-m);font-weight:700;letter-spacing:.14em;font-variant-numeric:tabular-nums;min-width:120px;justify-content:flex-start}
+td.code button{min-width:72px}
 td:last-child{text-align:right;width:1%;white-space:nowrap}
 /* kodefelter (trænerkode, personlig kode) */
 .pin{max-width:400px;margin:8vh auto 0;display:grid;gap:var(--s3);text-align:center}
@@ -209,6 +235,13 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 .pin button.acc{min-height:52px;font-size:var(--fs-m)}
 .pin .sec{text-align:left}
 .pin .sec input{min-height:var(--hit);text-align:left;font-size:var(--fs-m);font-weight:400;letter-spacing:0}
+.pin .pinRow{display:flex;gap:var(--s2)}
+.pin .pinRow input{flex:1}
+.pin label{font-size:var(--fs-s);text-align:left;margin-bottom:-6px}
+.pin .alt{display:grid;gap:var(--s2);text-align:left;padding:var(--s4);border:1px solid var(--line);border-radius:var(--r-box);background:var(--panel)}
+.pin .alt input{min-height:var(--hit);text-align:left;font-size:var(--fs-m);font-weight:400;letter-spacing:0}
+/* kodeskærm over Live (Klip fra, Indstil felter, Slet opstilling) */
+.gate{position:fixed;inset:0;z-index:25;overflow:auto;background:var(--bg);padding:var(--s4) var(--s4) var(--s6)}
 .err{color:var(--bad);min-height:1.4em;margin:0;font-size:var(--fs-s);font-weight:600}
 .sec .err:empty{display:none}
 
@@ -283,7 +316,8 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
   .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:var(--s3)}
   .clip .meta{padding:var(--s2) var(--s3) var(--s3)}
   .sec{padding:var(--s4)}
-  td.code button{min-width:0;letter-spacing:.08em;padding:0 var(--s2)}
+  td.code button{min-width:0;padding:0 var(--s2)}
+  td.code .cv{min-width:6.5em;letter-spacing:.06em}
   td:nth-child(4) button{padding:0 var(--s2)}
   .modal .top,.modal .ctl{padding:var(--s2) var(--s3)}
   .modal .top b{font-size:var(--fs-m)}
@@ -326,9 +360,11 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
       <canvas id="screen"></canvas>
       <div class="toast" id="toast" hidden></div>
       <div class="drag" id="dragBox" hidden></div>
+      <div class="calmHint" id="calmHint" aria-hidden="true">Tryk for knapper</div>
       <div class="zonehelp" id="zoneHelp" hidden>
         <div class="grp seg" id="zoneKind" role="group" aria-label="Felttype"><button data-k="air" class="on">Luftfelt</button><button data-k="lane">Bane</button></div>
         <span id="zoneTxt">Træk et felt hen over luften, hvor gymnasterne er i luften på det redskab, der skal tælle. Op til 4 felter.</span>
+        <label for="zoneName">Opstilling (redskab):</label>
         <input id="zoneName" type="text" aria-label="Navn på opstilling">
         <button id="zoneClear">Ryd felter</button>
         <button id="zoneDel" class="bad ghost">Slet opstilling</button>
@@ -338,10 +374,10 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
         <div class="card">
           <h1>Klar til træning</h1>
           <p>Sæt iPad'en på stativet med kameraet mod landingen. Start kameraet, og vælg 1, 2 eller 4 billeder med hver sin forsinkelse. Tryk på et billede for at vælge det, og ret dets forsinkelse nederst.</p>
-          <p class="note">Knapperne skjuler sig efter 8 sekunder. Tryk på skærmen for at få dem frem igen.</p>
+          <p class="note">Når der ikke bliver rørt ved skærmen i 8 sekunder, skjuler knapperne sig (ikke under pause). Tryk på skærmen for at få dem frem igen.</p>
           <button class="acc" id="startCam">Start kamera</button>
           <p id="camErr" class="err"></p>
-          <p class="note">Billeder og klip bliver kun gemt på denne enhed.</p>
+          <p class="note">Det forsinkede billede gemmes ikke. Klip af springene sendes til skyen, når en træner er logget ind: trænerne ser alle klip, hver gymnast ser sine egne med sin kode, og holdomgange kan hele holdet se. Klippene slettes automatisk efter <span id="keepNote">10</span> dage.</p>
         </div>
       </div>
     </div>
@@ -352,7 +388,7 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
       </div>
       <div class="grp">
         <button id="clipBtn" aria-pressed="true">Klip: til</button>
-        <button id="holdBtn" aria-pressed="false">Holdomgang</button>
+        <button id="holdBtn" aria-pressed="false">Holdomgang<small>hele holdet i ét klip</small></button>
         <button id="ciBtn">Indtjekning</button>
         <select id="presetSel" aria-label="Opstilling: hvilket redskab tæller som spring" ></select>
       </div>
@@ -360,7 +396,7 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
         <button data-n="1" aria-label="Ét billede">1</button><button data-n="2" aria-label="To billeder">2</button><button data-n="4" aria-label="Fire billeder">4</button>
       </div>
       <div class="grp">
-        <label for="delayIn" id="delayLbl">Forsinkelse</label>
+        <label for="delayIn" id="delayLbl">Forsinkelse<small>sek. efter springet</small></label>
         <button id="dMinus" aria-label="Et sekund mindre">−</button>
         <input id="delayIn" type="number" min="0" max="90" inputmode="numeric" value="30">
         <button id="dPlus" aria-label="Et sekund mere">+</button>
@@ -374,11 +410,11 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
       </div>
       <div class="grow"></div>
       <div class="grp more">
-        <label>Bevægelse</label><div class="meter" aria-hidden="true"><i id="meter"></i></div>
+        <label>Bevægelse<small>i felterne nu</small></label><div class="meter" aria-hidden="true"><i id="meter"></i></div>
         <button id="flipBtn" class="ghost">Spejlvend</button>
         <button id="camSwitch" class="ghost">Skift kamera</button>
         <button id="zoneBtn" class="ghost">Indstil felter</button>
-        <button id="detBtn" class="ghost" aria-pressed="false">Vis genkendelse</button>
+        <button id="detBtn" class="ghost" aria-pressed="false">Vis genkendelse<small>hvad kameraet ser</small></button>
       </div>
     </div>
   </section>
@@ -398,6 +434,8 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
     <div class="wrap" id="setupWrap"></div>
   </section>
 </main>
+
+<div class="gate" id="gate" hidden><div id="gateWrap"></div><div class="row" style="justify-content:center;margin-top:var(--s3)"><button id="gateNo">Annullér</button></div></div>
 
 <div class="modal" id="player" hidden>
   <div class="top"><b id="plTitle">Spring</b><button id="plClose">Luk</button></div>
