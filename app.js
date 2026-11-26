@@ -881,7 +881,7 @@ function newSpring(start, end, opt = {}) {
 
 // ---------- Nummerskilte ----------
 let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring', tagReq = null, tagSent = 0;
-try { worker = new Worker('worker.js?v=20261126134819'); } catch { worker = null; }
+try { worker = new Worker('worker.js?v=20261126143149'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onerror = () => { tagBusy = false; tagReq = null; };
 if (worker) worker.onmessage = (e) => {
@@ -2536,7 +2536,7 @@ if (location.hash === '#mine') {
 addEventListener('hashchange', () => { if ((location.hash === '#mine') !== document.body.classList.contains('gymnast')) location.reload(); });
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261126134819';
+const APP_VERSION = '20261126143149';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
