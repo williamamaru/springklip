@@ -782,12 +782,12 @@ function newSpring(start, end, opt = {}) {
 
 // ---------- Nummerskilte ----------
 let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring', tagReq = null, tagSent = 0;
-try { worker = new Worker('worker.js?v=20261126130607'); } catch { worker = null; }
+try { worker = new Worker('worker.js?v=20261126134819'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onerror = () => { tagBusy = false; tagReq = null; };
 if (worker) worker.onmessage = (e) => {
   const { t, found, dim } = e.data;
-  if (tagKind === 'ci') ci.dim = `Kamera ${cam.videoWidth}x${cam.videoHeight}, læst ${dim || '?'}, fundet: ${found.map((f) => f.id + ':' + Math.round(f.size)).join(' ') || 'intet'}`;
+  if (tagKind === 'ci' && CI_DIAG) ci.dim = `Kamera ${cam.videoWidth}x${cam.videoHeight}, læst ${dim || '?'}, fundet: ${found.map((f) => f.id + ':' + Math.round(f.size)).join(' ') || 'intet'}`;
   if (t !== tagReq) return; // svar på en opgivet læsning (fx fra før kameraskiftet)
   tagBusy = false; tagReq = null;
   if (tagKind === 'ci') { ciOnRead(found); return; }
@@ -870,6 +870,7 @@ function finishSpring(s) {
 // Valgfrit: skiltene er generiske. Ved træningens start holder gymnasten sit skilt op foran iPad'en og vælger sit navn.
 // Koblingerne (skilt -> gymnast) gælder resten af dagen. Er der ingen indtjekning i dag, er skilt N = gymnast nr. N som før.
 const CI_READ_GAP = 0.25, CI_NEED = 3;
+const CI_DIAG = /[?&]diag\b/.test(location.search); // diagnoselinje i indtjekningen kun med ?diag i adressen
 const ci = { front: false, note: '', camOp: Promise.resolve(), open: false, state: 'scan', tag: 0, g: 0, msg: '', sub: '', streak: { id: 0, n: 0 }, ign: null, timer: 0, raf: 0, sure: false };
 function dayKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function ciData() {
@@ -2123,7 +2124,7 @@ if (location.hash === '#mine') {
 }
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261126130607';
+const APP_VERSION = '20261126134819';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });
