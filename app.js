@@ -37,7 +37,7 @@ const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing
 let S;
 try { const o = JSON.parse(localStorage.getItem(KEY) || '{}'); S = Object.assign({}, DEF, o && typeof o === 'object' && !Array.isArray(o) ? o : {}); } catch { S = { ...DEF }; }
 // ødelagte/gamle data i localStorage må ikke give en hvid side: ret alt til gyldige værdier
-{
+function sanitizeS() {
   const fin = (v) => typeof v === 'number' && isFinite(v);
   const okRect = (z) => z && typeof z === 'object' && ['x0', 'y0', 'x1', 'y1'].every((k) => fin(z[k]));
   const okLane = (z) => z && z.type === 'lane' && Array.isArray(z.pts) && z.pts.length === 4 && z.pts.every((q) => q && fin(q.x) && fin(q.y));
@@ -52,7 +52,11 @@ try { const o = JSON.parse(localStorage.getItem(KEY) || '{}'); S = Object.assign
   if (typeof S.trainerHash !== 'string') S.trainerHash = '';
   S.roster = Array.isArray(S.roster) ? S.roster.filter((g) => g && typeof g === 'object' && isFinite(+g.n) && +g.n > 0).map((g) => ({ ...g, n: Math.round(+g.n), name: typeof g.name === 'string' ? g.name : '', code: typeof g.code === 'string' ? g.code : '' })) : [];
   if (S.checkin && (typeof S.checkin !== 'object' || !S.checkin.map || typeof S.checkin.map !== 'object')) S.checkin = null;
+  if (!Array.isArray(S.presets) || !S.presets.length) S.presets = [{ name: 'Trampet', zones: [S.zone || DEF.zone] }, { name: 'Bane', zones: [] }];
+  if (!(Number.isInteger(S.pi) && S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
+  if (!Array.isArray(S.delays) || S.delays.length < 4) S.delays = [S.delay ?? 30, 33, 36, 39];
 }
+sanitizeS();
 // opstillinger: hver har sit navn (fx Trampet, Bane) og sine luftfelter
 if (!Array.isArray(S.presets) || !S.presets.length) S.presets = [{ name: 'Trampet', zones: [S.zone || DEF.zone] }, { name: 'Bane', zones: [] }];
 if (!(Number.isInteger(S.pi) && S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
@@ -1737,7 +1741,8 @@ async function holdChPut(rec) { try { const d = await holdChDb(); d.transaction(
 async function holdChDel(id0, no) {
   try { const d = await holdChDb(), pre = `${id0}|${no}|`; d.transaction('ch', 'readwrite').objectStore('ch').delete(IDBKeyRange.bound(pre, pre + '\uffff')); } catch {}
 }
-async function holdRecover() {
+async function holdRecover(rec) {
+  if (location.hash === '#mine') return; // gymnastvisning: træneren gendanner ved næste normale start
   try {
     const d = await holdChDb();
     const all = await new Promise((res, rej) => { const q = d.transaction('ch').objectStore('ch').getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
@@ -1749,7 +1754,7 @@ async function holdRecover() {
       if (Date.now() - last < 4000) continue; // en optagelse i en anden fane skriver stadig
       const f = rs[0];
       if (await getClip(`${f.id0}-hold${f.no}`).catch(() => 0)) { holdChDel(f.id0, f.no); continue; } // allerede gemt fuldt
-      await holdSave(f.no, f.at, last, rs.map((r) => r.b), (rs.find((r) => r.th) || {}).th || '', f.id0, f.mime);
+      await holdSave(f.no, f.at, last, rs.map((r) => r.b), (rs.find((r) => r.th) || {}).th || '', f.id0, f.mime, true);
     }
   } catch (e) { console.warn('holdRecover', e); }
 }
@@ -1770,14 +1775,14 @@ function holdStop() {
   hold.rec = null; holdUI();
   setTimeout(() => { if (!hold.on) holdFree(); }, 500); // lad sidste stykke blive afsluttet
 }
-async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.mime) {
+async function holdSave(no, at, end, parts, thumb, id0 = hold.id0, mime = hold.mime, recovered = false) {
   const blob = new Blob(parts, { type: mime.split(';')[0] });
   if (blob.size < 1000) { holdChDel(id0, no); return; }
   const c = { id: `${id0}-hold${no}`, d: no === 1 ? 'Holdomgang' : `Holdomgang · del ${no}`, at, g: TEAM, dur: Math.round((end - at) / 100) / 10, thumb, blob, mime: blob.type };
   try { await putClip(c); } catch (e) { console.warn('holdomgang kunne ikke gemmes', e); toast(saveErrMsg(e)); return; }
   holdChDel(id0, no);
   refreshLists(); setRec();
-  toast(no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
+  toast(recovered ? 'Holdomgang gendannet efter genindlæsning' : no === 1 && !hold.on ? 'Holdomgang gemt' : `Holdomgang del ${no} gemt`);
   cloudUpload(c);
 }
 function holdUI() {
@@ -2647,8 +2652,9 @@ addEventListener('storage', (e) => {
     S[k] = o[k]; ch.push(k);
   }
   if (!ch.length) return;
-  if (!(Number.isInteger(S.pi) && S.pi >= 0 && S.pi < S.presets.length)) S.pi = 0;
+  sanitizeS(); // samme kontrol som ved opstart (fx data fra en fane med en ældre version)
   try {
+    if (ch.some((k) => k === 'delays' || k === 'delay' || k === 'views')) { if (sel >= S.views) sel = 0; if (paused) lags = S.delays.slice(); else resetLags(); for (const b of $('layoutSeg').children) b.classList.toggle('on', +b.dataset.n === S.views); }
     if (ch.some((k) => k === 'presets' || k === 'pi')) syncPresetUI();
     if (ch.some((k) => k === 'delay' || k === 'delays')) syncDelayUI();
     if (ch.includes('checkin')) { syncCiBtn(); ciRender(); }
