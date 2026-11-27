@@ -33,7 +33,7 @@ function confirm2(b, txt, cls) {
 
 // ---------- Opsætning ----------
 const KEY = 'springklip.v1';
-const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 10, trainerHash: '', roster: [] };
+const DEF = { delay: 30, views: 1, delays: [30, 33, 36, 39], flip: false, facing: 'environment', zone: { x0: 0.3, y0: 0.04, x1: 0.78, y1: 0.37 }, sens: 1.5, keepDays: 10, trainerHash: '', trainerHashAt: 0, roster: [] };
 let S;
 try { const o = JSON.parse(localStorage.getItem(KEY) || '{}'); S = Object.assign({}, DEF, o && typeof o === 'object' && !Array.isArray(o) ? o : {}); } catch { S = { ...DEF }; }
 // ødelagte/gamle data i localStorage må ikke give en hvid side: ret alt til gyldige værdier
@@ -50,6 +50,7 @@ function sanitizeS() {
   if (!(fin(S.keepDays) && S.keepDays >= 1)) S.keepDays = DEF.keepDays;
   if (S.facing !== 'user') S.facing = 'environment';
   if (typeof S.trainerHash !== 'string') S.trainerHash = '';
+  if (!(fin(S.trainerHashAt) && S.trainerHashAt >= 0)) S.trainerHashAt = 0;
   S.roster = Array.isArray(S.roster) ? S.roster.filter((g) => g && typeof g === 'object' && isFinite(+g.n) && +g.n > 0).map((g) => ({ ...g, n: Math.round(+g.n), name: typeof g.name === 'string' ? g.name : '', code: typeof g.code === 'string' ? g.code : '' })) : [];
   if (S.checkin && (typeof S.checkin !== 'object' || !S.checkin.map || typeof S.checkin.map !== 'object')) S.checkin = null;
   if (!Array.isArray(S.presets) || !S.presets.length) S.presets = [{ name: 'Trampet', zones: [S.zone || DEF.zone] }, { name: 'Bane', zones: [] }];
@@ -886,7 +887,7 @@ function newSpring(start, end, opt = {}) {
 
 // ---------- Nummerskilte ----------
 let worker = null, tagBusy = false, lastTag = 0, tagKind = 'spring', tagReq = null, tagSent = 0;
-try { worker = new Worker('worker.js?v=20261127000824'); } catch { worker = null; }
+try { worker = new Worker('worker.js?v=20261127085408'); } catch { worker = null; }
 const TAG_WINDOW = 4.0;
 if (worker) worker.onerror = () => { tagBusy = false; tagReq = null; };
 if (worker) worker.onmessage = (e) => {
@@ -1432,6 +1433,45 @@ $('plNextClip').onclick = () => plGo(1);
     }
   };
 })();
+// Egen betjeningslinje: afspil/pause, spolebjælke og tid. Den indbyggede videobetjening er slået fra.
+(() => {
+  const btn = $('plPlay'), seek = $('plSeek'), tm = $('plTime');
+  const ICON_PLAY = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>';
+  const ICON_PAUSE = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>';
+  const sec = (x) => (isFinite(x) ? x : 0).toFixed(1).replace('.', ',');
+  let dragging = false, wasPlaying = false;
+  const dur = () => (isFinite(plV.duration) && plV.duration > 0 ? plV.duration : 0);
+  const upd = () => {
+    const d = dur();
+    if (!dragging) seek.value = d ? Math.round((plV.currentTime / d) * 1000) : 0;
+    tm.textContent = `${sec(plV.currentTime)} / ${sec(d)} s`;
+  };
+  const updBtn = () => {
+    const p = plV.paused || plV.ended;
+    btn.innerHTML = p ? ICON_PLAY : ICON_PAUSE;
+    btn.setAttribute('aria-label', p ? 'Afspil' : 'Pause');
+  };
+  const vis = () => { $('plBar').hidden = plV.hidden; };
+  ['timeupdate', 'loadedmetadata', 'durationchange', 'seeked', 'emptied'].forEach((e) => plV.addEventListener(e, upd));
+  ['play', 'pause', 'ended', 'emptied', 'loadeddata'].forEach((e) => plV.addEventListener(e, () => { updBtn(); vis(); }));
+  btn.onclick = () => {
+    if (dw.on) dwSet(false);
+    if (plV.paused || plV.ended) plV.play().catch(() => {}); else plV.pause();
+  };
+  seek.addEventListener('pointerdown', () => { if (!dragging) { dragging = true; wasPlaying = !plV.paused && !plV.ended; plV.pause(); } });
+  seek.addEventListener('input', () => {
+    const d = dur(); if (!d) return;
+    if (!dragging) { dragging = true; wasPlaying = !plV.paused && !plV.ended; plV.pause(); }
+    plV.currentTime = (seek.value / 1000) * d;
+    tm.textContent = `${sec(plV.currentTime)} / ${sec(d)} s`;
+  });
+  const end = () => { if (!dragging) return; dragging = false; if (wasPlaying && !dw.on) plV.play().catch(() => {}); upd(); };
+  seek.addEventListener('change', end);
+  seek.addEventListener('pointerup', end);
+  seek.addEventListener('pointercancel', end);
+  new MutationObserver(vis).observe(plV, { attributes: true, attributeFilter: ['hidden'] });
+  vis(); updBtn();
+})();
 // Gem/del video. Skyklip hentes som fil (fra cachen, hvis den allerede er hentet). iPhone/iPad: del-arket med fil; ellers download; ellers åbn i ny fane.
 async function plBlobFor(c) {
   if (c.blob) return c.blob;
@@ -1495,8 +1535,8 @@ function dwSet(on) {
   $('plTools').hidden = !dw.on;
   dw.cv.classList.toggle('on', dw.on);
   $('plTap').hidden = dw.on; $('plMark').hidden = dw.on || !plV.paused || plV.hidden;
-  if (dw.on) { plV.pause(); clearTimeout(plTimer); plV.controls = false; $('plStep').hidden = plV.hidden; }
-  else { plV.controls = true; if (dw.cur && dw.cur.t === 'angle' && dw.cur.p.length < 3) dwDropCur(); }
+  if (dw.on) { plV.pause(); clearTimeout(plTimer); $('plStep').hidden = plV.hidden; }
+  else { if (dw.cur && dw.cur.t === 'angle' && dw.cur.p.length < 3) dwDropCur(); }
   dwVis();
 }
 $('plDrawBtn').onclick = () => dwSet(!dw.on);
@@ -1968,7 +2008,7 @@ function pinScreen(wrap, title, onOk, opt = {}) {
     : '<button type="button" class="ghost pinAlt">Glemt koden? Log ind med trænerlogin</button>') : '';
   wrap.innerHTML = `<form class="pin" novalidate${opt.reset ? ' data-keep' : ''}>
     <h2>${esc(title)}</h2>
-    <p class="muted">${opt.reset ? 'Vælg en ny trænerkode på 6 cifre.' : first ? 'Vælg en trænerkode på 6 cifre. Den beskytter klip, opsætning og pigernes koder på denne enhed.' : 'Skriv trænerkoden (6 cifre).'}</p>
+    <p class="muted">${opt.reset ? 'Vælg en ny trænerkode på 6 cifre.' : first ? (cloudTrainer ? 'Vælg en trænerkode på 6 cifre. Den gemmes under dit trænerlogin, så den virker på alle dine enheder. Den beskytter klip, opsætning og pigernes koder.' : 'Vælg en trænerkode på 6 cifre. Den beskytter klip, opsætning og pigernes koder på denne enhed.') : 'Skriv trænerkoden (6 cifre).'}</p>
     <div class="pinRow">${pinInput('pinIn', first ? 'Ny trænerkode' : 'Trænerkode', first)}<button type="button" class="ghost pinEye" aria-pressed="false">Vis</button></div>
     ${first ? `<label>Skriv den samme kode igen</label>${pinInput('pinRep', 'Gentag trænerkoden', true)}` : ''}
     <button class="acc">${first ? 'Gem kode' : 'Åbn'}</button>
@@ -1984,7 +2024,7 @@ function pinScreen(wrap, title, onOk, opt = {}) {
     if (first) {
       const m = pinNewErr(v, q('.pinRep').value.trim());
       if (m) { err.textContent = m; return; }
-      S.trainerHash = await sha(v); save();
+      S.trainerHash = await sha(v); S.trainerHashAt = Date.now(); save(); pinPush();
     } else if ((await sha(v)) !== S.trainerHash) {
       err.textContent = pinFail();
       q('.pinIn').value = '';
@@ -2025,10 +2065,10 @@ function pinCloud(wrap, title, onOk, mode) {
     try {
       const r = await sb.auth.signInWithPassword({ email, password });
       if (r.error) { err.textContent = netMsg(r.error) || 'Forkert e-mail eller adgangskode.'; return; }
-      const { data: t, error: te } = await sb.from('trainers').select('user_id').eq('user_id', r.data.user.id).maybeSingle();
+      const { data: t, error: te } = await sb.from('trainers').select('user_id, pin_hash, pin_at').eq('user_id', r.data.user.id).maybeSingle();
       if (te) { err.textContent = netMsg(te) || 'Kunne ikke tjekke trænerkontoen. Prøv igen.'; return; }
       ok = !!t;
-      if (ok) { cloudUser = r.data.user; cloudTrainer = true; }
+      if (ok) { cloudUser = r.data.user; cloudTrainer = true; if (mode !== 'forgot') pinFromCloud(t); }
     } catch { err.textContent = 'Ingen forbindelse til skyen. Tjek internettet, og prøv igen.'; return; }
     if (!ok) { err.textContent = 'Kontoen er ikke godkendt som træner.'; return; }
     S.pinFails = 0; S.pinLock = 0; save();
@@ -2433,8 +2473,8 @@ function pinChange() {
     S.pinFails = 0; S.pinLock = 0;
     const v = q('.pcNew').value.trim(), m = pinNewErr(v, q('.pcRep').value.trim());
     if (m) { save(); err.textContent = m; return; }
-    S.trainerHash = await sha(v); save();
-    renderSetup(); toast('Trænerkoden er skiftet');
+    S.trainerHash = await sha(v); S.trainerHashAt = Date.now(); save(); pinPush();
+    renderSetup(); toast(cloudTrainer ? 'Trænerkoden er skiftet på alle dine enheder' : 'Trænerkoden er skiftet');
   };
   q('.pcOld').focus();
 }
@@ -2468,9 +2508,9 @@ async function cloudCheck() {
       cloudUser = data?.session?.user || null;
       if (!cloudUser) cloudTrainer = false;
       else {
-        const r = await sb.from('trainers').select('user_id').eq('user_id', cloudUser.id).maybeSingle();
+        const r = await sb.from('trainers').select('user_id, pin_hash, pin_at').eq('user_id', cloudUser.id).maybeSingle();
         nm = r.error ? netMsg(r.error, r.status) || (r.status ? null : NET_OFF) : null;
-        if (!nm) cloudTrainer = !!r.data; // ved netværksfejl beholdes det, vi vidste i forvejen
+        if (!nm) { cloudTrainer = !!r.data; if (r.data) pinFromCloud(r.data); } // ved netværksfejl beholdes det, vi vidste i forvejen
       }
     }
   } catch (e) { nm = netMsg(e) || NET_DOWN; }
@@ -2482,6 +2522,22 @@ async function cloudCheck() {
   if (view === 'setup' && trainerOk) renderCloud();
   if ((view === 'setup' || view === 'clips') && !trainerOk && cloudTrainer && !$(view).querySelector('[data-keep]')) show(view); // ikke midt i trænerlogin/ny kode
   if (cloudTrainer) { cloudRetry(); cloudPrune(); rosterPull(); }
+}
+// Trænerkoden følger trænerloginet: kun koden som hash gemmes i skyen (trainers.pin_hash). Nyeste ændring vinder.
+const HASH_OK = /^[0-9a-f]{64}$/;
+async function pinPush() {
+  if (!sb || !cloudTrainer || !HASH_OK.test(S.trainerHash || '')) return;
+  if (!S.trainerHashAt) { S.trainerHashAt = Date.now(); save(); }
+  try { await sb.rpc('set_trainer_pin', { p_hash: S.trainerHash, p_at: new Date(S.trainerHashAt).toISOString() }); } catch {}
+}
+function pinFromCloud(row) {
+  if (!row) return;
+  const at = row.pin_at ? Date.parse(row.pin_at) || 0 : 0;
+  if (HASH_OK.test(row.pin_hash || '') && row.pin_hash !== S.trainerHash && (!S.trainerHash || at > (S.trainerHashAt || 0))) {
+    const had = !!S.trainerHash;
+    S.trainerHash = row.pin_hash; S.trainerHashAt = at; save();
+    toast(had ? 'Trænerkoden er opdateret fra dit trænerlogin' : 'Trænerkoden er hentet fra dit trænerlogin');
+  } else if (S.trainerHash && row.pin_hash !== S.trainerHash) pinPush(); // denne enhed har den nyeste kode
 }
 const codeHash = async (n, code) => {
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`springklip:${n}:${code}`));
@@ -2665,7 +2721,7 @@ addEventListener('storage', (e) => {
 });
 
 // Ny version: GitHub gemmer siden i op til 10 minutter. Siden tjekker selv og tilbyder at opdatere.
-const APP_VERSION = '20261127000824';
+const APP_VERSION = '20261127085408';
 async function checkVersion() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' });

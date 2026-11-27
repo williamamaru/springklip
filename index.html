@@ -287,13 +287,19 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 #plNav[hidden]{display:none}
 #plPos{min-width:56px;text-align:center;font-size:var(--fs-s);font-variant-numeric:tabular-nums}
 #plNav button{padding:0;width:var(--hit)}
-#plTap{position:absolute;left:0;right:0;top:0;bottom:64px;z-index:1;touch-action:none;-webkit-tap-highlight-color:transparent}
+#plTap{position:absolute;left:0;right:0;top:0;bottom:0;z-index:1;touch-action:none;-webkit-tap-highlight-color:transparent}
 #plTap[hidden]{display:none}
-#plMark{position:absolute;left:50%;top:calc(50% - 32px);width:72px;height:72px;margin:-36px 0 0 -36px;border-radius:50%;background:rgb(0 0 0 / .6);display:grid;place-items:center;pointer-events:none;z-index:1}
+#plMark{position:absolute;left:50%;top:50%;width:72px;height:72px;margin:-36px 0 0 -36px;border-radius:50%;background:rgb(0 0 0 / .6);display:grid;place-items:center;pointer-events:none;z-index:1}
 #plMark[hidden]{display:none}
 #plMark svg{width:36px;height:36px;fill:#fff}
 /* tegning i afspilleren (kun træner): canvas ligger præcis over det viste billede */
-#player{grid-template-rows:auto minmax(0,1fr) auto auto}
+#player{grid-template-rows:auto minmax(0,1fr) auto auto auto}
+/* egen betjeningslinje (ingen indbygget videobetjening: på iPhone gav den en ekstra afspil-knap oven i vores) */
+#plBar{flex-wrap:nowrap}
+#plBar[hidden]{display:none}
+#plPlay{padding:0;width:var(--hit);flex:none}
+#plSeek{flex:1;min-width:0;height:var(--hit);margin:0;accent-color:var(--acc);touch-action:none}
+#plTime{flex:none;min-width:84px;text-align:right;font-size:var(--fs-s);font-variant-numeric:tabular-nums}
 .modal #plDraw{position:absolute;left:0;top:0;width:0;height:0;background:transparent;object-fit:fill;touch-action:none;pointer-events:none;z-index:2}
 .modal #plDraw.on{pointer-events:auto;cursor:crosshair}
 #plTools .grow{flex:1}
@@ -475,9 +481,14 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 
 <div class="modal" id="player" hidden>
   <div class="top"><b id="plTitle">Spring</b><button id="plClose">Luk</button></div>
-  <div class="plbox"><video id="plVideo" playsinline controls muted></video><canvas id="plCanvas" hidden></canvas><canvas id="plDraw" hidden></canvas>
+  <div class="plbox"><video id="plVideo" playsinline webkit-playsinline disablepictureinpicture disableremoteplayback muted></video><canvas id="plCanvas" hidden></canvas><canvas id="plDraw" hidden></canvas>
     <div id="plTap" aria-hidden="true"></div>
     <div id="plMark" hidden aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg></div></div>
+  <div class="ctl" id="plBar">
+    <button id="plPlay" aria-label="Pause"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+    <input id="plSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="Spol i klippet">
+    <span id="plTime" class="muted">0,0 / 0,0 s</span>
+  </div>
   <div class="ctl">
     <div id="plNav" hidden><button id="plPrevClip" aria-label="Forrige klip"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><span id="plPos" class="muted"></span><button id="plNextClip" aria-label="Næste klip"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>
     <div class="seg" id="plSpeed" role="group" aria-label="Hastighed"><button data-r="0.25" aria-pressed="false">0,25×</button><button data-r="0.5" aria-pressed="false">0,5×</button><button data-r="1" class="on" aria-pressed="true">1×</button></div>
@@ -535,6 +546,6 @@ td:last-child{text-align:right;width:1%;white-space:nowrap}
 
 <script src="lib/supabase.js?v=2.119.0"></script>
 <script src="lib/mp4-muxer.js?v=5.2.2"></script>
-<script src="app.js?v=20261127000824"></script>
+<script src="app.js?v=20261127085408"></script>
 </body>
 </html>
